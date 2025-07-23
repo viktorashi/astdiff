@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.txt
+*.log
+*.tmp
+
+# Test outputs
+output.*
+verbose_output.*
+
+# Temporary shell scripts
+test_*.sh
+run_*.sh
+direct_*.sh
