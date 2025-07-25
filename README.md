@@ -79,15 +79,15 @@ function fn_1(param_1, param_2) {
 ./target/release/varmap minified.js --map
 ```
 ```
-# LINE:COL TYPE SCOPE ORIGINAL CANONICAL NEW_NAME CONTEXT
-1:10 ref global a fn_1 fn_1 "function a(b,c){var d=b+c;return d;}"
-1:12 ref fn_a b param_1 param_1 "function a(b,c){var d=b+c;return d;}"
-1:14 ref fn_a c param_2 param_2 "function a(b,c){var d=b+c;return d;}"
-1:21 ref fn_a d var_1 var_1 "function a(b,c){var d=b+c;return d;}"
+# FIRST LAST TYPE CANONICAL NEW
+1:10 1:10 func fn_7823 fn_7823
+1:12 1:25 param param_1 param_1
+1:14 1:29 param param_2 param_2
+1:21 1:35 var var_1 var_1
 ```
 
 ### Semantic Output (after editing mappings)
-After editing the NEW_NAME column in the mapping file:
+After editing the NEW column in the mapping file:
 ```javascript
 function addNumbers(firstNumber,secondNumber){var sum=firstNumber+secondNumber;return sum;}
 ```
@@ -129,7 +129,7 @@ The tool consists of four main components:
 
 1. **Parser Module**: Uses tree-sitter-javascript for robust JavaScript parsing
 2. **Scope Analyzer**: Tracks variable bindings and scope relationships
-3. **Canonicalizer**: Applies consistent naming scheme (fn_1, param_1, var_1, etc.)
+3. **Canonicalizer**: Applies structural hashing for functions and scope-local naming
 4. **Mapping Generator**: Creates and applies variable mappings
 
 ## Supported JavaScript Features

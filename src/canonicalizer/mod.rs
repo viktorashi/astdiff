@@ -90,6 +90,7 @@ impl Canonicalizer {
         format!("{:x}", hash % 0xFFFF)
     }
     
+    #[allow(dead_code)]
     /// Recursively hash the structure of an AST node
     fn hash_node_structure(&self, node: Node, source: &str, hasher: &mut DefaultHasher, depth: usize) {
         // Skip comments entirely
@@ -161,6 +162,7 @@ impl Canonicalizer {
         Ok(())
     }
     
+    #[allow(dead_code)]
     /// Find the function node at a specific position
     fn find_function_node_at_position<'a>(
         &self, 

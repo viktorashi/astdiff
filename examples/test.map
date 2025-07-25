@@ -1,16 +1,17 @@
-# Example VarMap Mapping File
-# This file demonstrates the mapping format used by VarMap for renaming variables.
-# Each line represents an identifier in the JavaScript code with the following fields:
-# - LINE:COL: Position in the source file
-# - TYPE: Type of identifier (ref, var, param, etc.)
-# - SCOPE: Scope where the identifier is defined
-# - ORIGINAL: Original name in the source code
-# - CANONICAL: Canonicalized name assigned by VarMap
-# - NEW_NAME: User-provided replacement name (for --map mode)
-# - CONTEXT: Code snippet showing the identifier in context
+# Example VarMap Mapping File - Simplified Format
+# This file demonstrates the new simplified mapping format.
+# Each identifier appears only once with its first and last usage.
 #
-# LINE:COL TYPE SCOPE ORIGINAL CANONICAL NEW_NAME CONTEXT
-1:10 ref global a fn_1 addNumbers "function a(b,c){var d=b+c;return d;}"
-1:12 ref fn_a b param_1 firstNumber "function a(b,c){var d=b+c;return d;}"
-1:14 ref fn_a c param_2 secondNumber "function a(b,c){var d=b+c;return d;}"
-1:21 ref fn_a d var_1 sum "function a(b,c){var d=b+c;return d;}"
+# Format: FIRST LAST TYPE CANONICAL NEW
+# - FIRST: First occurrence (line:column)
+# - LAST: Last occurrence (line:column) 
+# - TYPE: func, param, or var
+# - CANONICAL: Canonicalized name from VarMap
+# - NEW: User-provided replacement name
+#
+# Example entries:
+# FIRST LAST TYPE CANONICAL NEW
+1:10 1:10 func fn_7823 addNumbers
+1:12 1:25 param param_1 firstNumber
+1:14 1:29 param param_2 secondNumber
+1:21 1:35 var var_1 sum

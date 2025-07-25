@@ -6,13 +6,14 @@ use tree_sitter::Tree;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappingEntry {
-    pub position: String,           // LINE:COL
-    pub entry_type: String,         // func, param, var, ref
-    pub scope: String,              // global, func_a, etc.
+    pub first_line: usize,
+    pub first_col: usize,
+    pub last_line: usize,
+    pub last_col: usize,
+    pub entry_type: String,         // func, param, var
     pub original: String,           // original identifier
     pub canonical: String,          // fn_1, param_1, etc.
     pub new_name: String,           // user-editable semantic name
-    pub context: String,            // code context for understanding
 }
 
 pub struct MappingGenerator {
@@ -32,41 +33,64 @@ impl MappingGenerator {
         let mut output = String::new();
         
         // Header
-        output.push_str("# LINE:COL TYPE SCOPE ORIGINAL CANONICAL NEW_NAME CONTEXT\n");
+        output.push_str("# FIRST LAST TYPE CANONICAL NEW\n");
         
-        // Collect all mappings with context
-        let entries = self.collect_mapping_entries(tree)?;
+        // Collect all identifiers and group by canonical name
+        let mut identifier_groups: HashMap<String, Vec<crate::canonicalizer::IdentifierInfo>> = HashMap::new();
+        let canonicalizer_identifiers = self.canonicalizer.extract_all_identifiers(tree.root_node(), &self.source);
         
-        // Sort by position and deduplicate identical entries
-        let mut sorted_entries = entries;
-        sorted_entries.sort_by(|a, b| {
-            let a_parts: Vec<_> = a.position.split(':').collect();
-            let b_parts: Vec<_> = b.position.split(':').collect();
+        for identifier in canonicalizer_identifiers {
+            if let Some(canonical_name) = self.canonicalizer.find_canonical_name(&identifier.text, &identifier.scope_id) {
+                identifier_groups.entry(canonical_name).or_insert_with(Vec::new).push(identifier);
+            }
+        }
+        
+        // Create entries with first and last positions
+        let mut entries = Vec::new();
+        for (canonical, identifiers) in identifier_groups {
+            if identifiers.is_empty() {
+                continue;
+            }
             
-            let a_line: usize = a_parts[0].parse().unwrap_or(0);
-            let a_col: usize = a_parts[1].parse().unwrap_or(0);
-            let b_line: usize = b_parts[0].parse().unwrap_or(0);
-            let b_col: usize = b_parts[1].parse().unwrap_or(0);
+            // Find first and last positions
+            let first = identifiers.iter().min_by_key(|id| id.node.start_byte()).unwrap();
+            let last = identifiers.iter().max_by_key(|id| id.node.start_byte()).unwrap();
             
-            (a_line, a_col).cmp(&(b_line, b_col))
-        });
+            // Determine type from canonical name prefix
+            let entry_type = if canonical.starts_with("fn_") {
+                "func".to_string()
+            } else if canonical.starts_with("param_") {
+                "param".to_string()
+            } else {
+                "var".to_string()
+            };
+            
+            entries.push(MappingEntry {
+                first_line: first.node.start_position().row + 1,
+                first_col: first.node.start_position().column + 1,
+                last_line: last.node.start_position().row + 1,
+                last_col: last.node.start_position().column + 1,
+                entry_type,
+                original: identifiers[0].text.clone(),
+                canonical: canonical.clone(),
+                new_name: canonical,
+            });
+        }
         
-        // Remove exact duplicates (same position and content)
-        sorted_entries.dedup_by(|a, b| {
-            a.position == b.position && a.original == b.original && a.canonical == b.canonical
-        });
+        // Sort by first occurrence
+        entries.sort_by_key(|e| (e.first_line, e.first_col));
         
         // Format entries
-        for entry in sorted_entries {
+        for entry in entries {
             output.push_str(&format!(
-                "{} {} {} {} {} {} \"{}\"\n",
-                entry.position,
+                "{}:{} {}:{} {} {} {}\n",
+                entry.first_line,
+                entry.first_col,
+                entry.last_line,
+                entry.last_col,
                 entry.entry_type,
-                entry.scope,
-                entry.original,
                 entry.canonical,
-                entry.new_name,
-                entry.context
+                entry.new_name
             ));
         }
         
@@ -82,9 +106,10 @@ impl MappingGenerator {
             }
             
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 6 {
-                let canonical = parts[4];
-                let new_name = parts[5];
+            if parts.len() >= 5 {
+                // Format: first:col last:col type canonical new
+                let canonical = parts[3];
+                let new_name = parts[4];
                 mappings.insert(canonical.to_string(), new_name.to_string());
             }
         }
@@ -127,71 +152,39 @@ impl MappingGenerator {
         Ok(output)
     }
     
-    fn collect_mapping_entries(&self, tree: &Tree) -> Result<Vec<MappingEntry>> {
-        let mut entries = Vec::new();
-        
-        // Reuse canonicalizer's identifier extraction to avoid duplicate traversal
-        let canonicalizer_identifiers = self.canonicalizer.extract_all_identifiers(tree.root_node(), &self.source);
-        
-        // Convert canonicalizer identifiers to mapping entries
-        for canonical_id in canonicalizer_identifiers {
-            if let Some(canonical_name) = self.canonicalizer.find_canonical_name(&canonical_id.text, &canonical_id.scope_id) {
-                let position = format!("{}:{}", canonical_id.node.start_position().row + 1, canonical_id.node.start_position().column + 1);
-                
-                let entry_type = self.determine_entry_type_from_canonical_identifier(&canonical_id);
-                let context = self.extract_context_from_canonical_identifier(&canonical_id);
-                
-                entries.push(MappingEntry {
-                    position,
-                    entry_type,
-                    scope: canonical_id.scope_id.clone(),
-                    original: canonical_id.text.clone(),
-                    canonical: canonical_name.clone(),
-                    new_name: canonical_name, // Initially same as canonical
-                    context,
-                });
-            }
-        }
-        
-        Ok(entries)
-    }
-    
-    
-    fn determine_entry_type_from_canonical_identifier(&self, identifier: &crate::canonicalizer::IdentifierInfo) -> String {
+    #[allow(dead_code)]
+    fn determine_entry_type(&self, identifier: &crate::canonicalizer::IdentifierInfo) -> String {
         if let Some(parent) = identifier.node.parent() {
             match parent.kind() {
-                "variable_declarator" => {
-                    if parent.child_by_field_name("name") == Some(identifier.node) {
-                        "var".to_string()
-                    } else {
-                        "ref".to_string()
-                    }
-                }
+                "variable_declarator" => "var".to_string(),
                 "formal_parameters" => "param".to_string(),
                 "function_declaration" | "function_expression" => {
                     if parent.child_by_field_name("name") == Some(identifier.node) {
                         "func".to_string()
                     } else {
-                        "ref".to_string()
+                        "var".to_string() // Default to var for other cases
                     }
                 }
-                _ => "ref".to_string(),
+                _ => {
+                    // Determine type from the canonical name pattern
+                    if let Some(canonical) = self.canonicalizer.find_canonical_name(&identifier.text, &identifier.scope_id) {
+                        if canonical.starts_with("param_") {
+                            "param".to_string()
+                        } else if canonical.starts_with("fn_") {
+                            "func".to_string()
+                        } else {
+                            "var".to_string()
+                        }
+                    } else {
+                        "var".to_string()
+                    }
+                }
             }
         } else {
-            "ref".to_string()
+            "var".to_string()
         }
     }
     
-    fn extract_context_from_canonical_identifier(&self, identifier: &crate::canonicalizer::IdentifierInfo) -> String {
-        let lines: Vec<&str> = self.source.lines().collect();
-        let line_num = identifier.node.start_position().row;
-        if line_num < lines.len() {
-            let line = lines[line_num];
-            line.trim().to_string()
-        } else {
-            String::new()
-        }
-    }
     
 }
 
@@ -213,13 +206,12 @@ mod tests {
         analyzer.analyze(tree.root_node(), source).unwrap();
         
         let mut canonicalizer = Canonicalizer::new(analyzer);
-        canonicalizer.canonicalize().unwrap();
+        canonicalizer.canonicalize(&tree, source).unwrap();
         
         let generator = MappingGenerator::new(canonicalizer, source.to_string());
         let mapping_file = generator.generate_mapping_file(&tree).unwrap();
         
-        assert!(mapping_file.contains("LINE:COL TYPE SCOPE ORIGINAL CANONICAL NEW_NAME CONTEXT"));
-        assert!(mapping_file.contains("add"));
-        assert!(mapping_file.contains("fn_1"));
+        assert!(mapping_file.contains("# FIRST LAST TYPE CANONICAL NEW"));
+        assert!(mapping_file.contains("fn_"));
     }
 }
