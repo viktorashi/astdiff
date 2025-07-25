@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use anyhow::Result;
 use tree_sitter::{Node, Tree};
 use crate::scope::{Scope, ScopeAnalyzer, VariableKind};
@@ -25,10 +27,15 @@ pub struct Position {
 
 #[derive(Default)]
 struct NameCounters {
-    function_counter: usize,
-    variable_counter: usize, // Global counter for all variables
-    parameter_counter: usize, // Global counter for all parameters
+    scope_counters: HashMap<String, ScopeLocalCounters>, // Per-scope counters
+    function_hashes: HashMap<String, usize>, // Track collisions: hash -> counter
     class_counter: usize,
+}
+
+#[derive(Default)]
+struct ScopeLocalCounters {
+    variable_counter: usize,
+    parameter_counter: usize,
 }
 
 impl Canonicalizer {
@@ -40,18 +47,177 @@ impl Canonicalizer {
         }
     }
     
-    pub fn canonicalize(&mut self) -> Result<()> {
+    /// Hash the function's scope structure (parameters and variables)
+    fn hash_function_scope_structure(&self, scope_id: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        
+        // Get the scope for this function
+        if let Some(scope) = self.scope_analyzer.get_scopes().get(scope_id) {
+            // Sort variables by kind and position for stable ordering
+            let mut vars = scope.variables.clone();
+            vars.sort_by_key(|v| (
+                match v.kind {
+                    VariableKind::Parameter => 0,
+                    VariableKind::Var => 1,
+                    VariableKind::Let => 2,
+                    VariableKind::Const => 3,
+                    _ => 4,
+                },
+                v.declaration_line,
+                v.declaration_column
+            ));
+            
+            // Hash the structure: parameter count, then variable kinds
+            let param_count = vars.iter().filter(|v| matches!(v.kind, VariableKind::Parameter)).count();
+            param_count.hash(&mut hasher);
+            
+            // Hash variable declaration pattern (just the kinds, not names)
+            for var in &vars {
+                match var.kind {
+                    VariableKind::Parameter => "param".hash(&mut hasher),
+                    VariableKind::Var => "var".hash(&mut hasher),
+                    VariableKind::Let => "let".hash(&mut hasher),
+                    VariableKind::Const => "const".hash(&mut hasher),
+                    _ => {}
+                }
+            }
+            
+            // Also hash child scope count to capture nesting
+            scope.children.len().hash(&mut hasher);
+        }
+        
+        let hash = hasher.finish();
+        format!("{:x}", hash % 0xFFFF)
+    }
+    
+    /// Recursively hash the structure of an AST node
+    fn hash_node_structure(&self, node: Node, source: &str, hasher: &mut DefaultHasher, depth: usize) {
+        // Skip comments entirely
+        if node.kind() == "comment" {
+            return;
+        }
+        
+        // Hash node type
+        node.kind().hash(hasher);
+        
+        match node.kind() {
+            // For operators and keywords, hash the exact type
+            "binary_expression" => {
+                // Also hash the operator
+                if let Some(op) = node.child(1) {
+                    op.kind().hash(hasher);
+                }
+            }
+            
+            // For literals, hash just the type, not the value
+            "number" | "string" | "true" | "false" | "null" | "undefined" => {
+                // Already hashed the type above
+            }
+            
+            // For identifiers, don't hash the name
+            "identifier" | "property_identifier" | "shorthand_property_identifier" => {
+                // Already hashed the type above
+            }
+            
+            // For control flow, hash the structure
+            "return_statement" | "break_statement" | "continue_statement" | 
+            "if_statement" | "while_statement" | "for_statement" | "for_in_statement" |
+            "for_of_statement" | "do_statement" | "switch_statement" => {
+                // Hash child count to capture structure
+                node.child_count().hash(hasher);
+            }
+            
+            // Skip certain nodes that don't affect structure
+            ";" | "," | "(" | ")" | "{" | "}" | "[" | "]" => {
+                return; // Don't hash punctuation
+            }
+            
+            _ => {
+                // For other nodes, hash child count
+                node.child_count().hash(hasher);
+            }
+        }
+        
+        // Recursively hash children, but skip comments
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.kind() != "comment" {
+                    self.hash_node_structure(child, source, hasher, depth + 1);
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+    
+    pub fn canonicalize(&mut self, tree: &Tree, source: &str) -> Result<()> {
         let scopes = self.scope_analyzer.get_scopes().clone();
         
-        self.canonicalize_scope("global", &scopes)?;
+        self.canonicalize_scope("global", &scopes, tree, source)?;
         
         Ok(())
+    }
+    
+    /// Find the function node at a specific position
+    fn find_function_node_at_position<'a>(
+        &self, 
+        node: Node<'a>, 
+        line: usize, 
+        column: usize,
+        source: &str,
+    ) -> Option<Node<'a>> {
+        if node.kind() == "function_declaration" || node.kind() == "function_expression" {
+            let pos = node.start_position();
+            // Both tree-sitter and scope analyzer use 0-based positions
+            // The scope analyzer reports the position of the function name, 
+            // but the function node starts at the "function" keyword
+            if pos.row == line {
+                // Check if the function name is at the expected position
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name_pos = name_node.start_position();
+                    if name_pos.column == column {
+                        if std::env::var("VARMAP_DEBUG").is_ok() {
+                            eprintln!("Found function node at {}:{} (name at {}:{})", 
+                                pos.row, pos.column, name_pos.row, name_pos.column);
+                        }
+                        return Some(node);
+                    } else if std::env::var("VARMAP_DEBUG").is_ok() {
+                        eprintln!("Function at line {}: name at column {} (expected {})", 
+                            pos.row, name_pos.column, column);
+                    }
+                }
+            }
+        }
+        
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                if let Some(found) = self.find_function_node_at_position(
+                    cursor.node(), 
+                    line, 
+                    column,
+                    source
+                ) {
+                    return Some(found);
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        
+        None
     }
     
     fn canonicalize_scope(
         &mut self,
         scope_id: &str,
         all_scopes: &HashMap<String, Scope>,
+        tree: &Tree,
+        source: &str,
     ) -> Result<()> {
         let scope = all_scopes.get(scope_id).ok_or_else(|| {
             anyhow::anyhow!("Scope not found: {}", scope_id)
@@ -61,7 +227,15 @@ impl Canonicalizer {
         sorted_variables.sort_by_key(|v| (v.declaration_line, v.declaration_column));
         
         for variable in sorted_variables {
-            let canonical_name = self.generate_canonical_name(&variable.kind, scope_id);
+            let function_node = if matches!(variable.kind, VariableKind::FunctionDeclaration) && scope_id.starts_with("fn_") {
+                // For now, let's use a simpler approach - hash based on the scope's variables
+                // This gives us stability based on function structure
+                None // We'll use a different approach
+            } else {
+                None
+            };
+            
+            let canonical_name = self.generate_canonical_name(&variable.kind, scope_id, function_node, source, &variable.name);
             
             let mapping = CanonicalMapping {
                 original_name: variable.name.clone(),
@@ -78,25 +252,67 @@ impl Canonicalizer {
         }
         
         for child_scope_id in &scope.children {
-            self.canonicalize_scope(child_scope_id, all_scopes)?;
+            self.canonicalize_scope(child_scope_id, all_scopes, tree, source)?;
         }
         
         Ok(())
     }
     
-    fn generate_canonical_name(&mut self, kind: &VariableKind, _scope_id: &str) -> String {
+    fn generate_canonical_name(
+        &mut self, 
+        kind: &VariableKind, 
+        scope_id: &str, 
+        _function_node: Option<Node>,
+        _source: &str,
+        variable_name: &str,
+    ) -> String {
         match kind {
             VariableKind::FunctionDeclaration => {
-                self.counters.function_counter += 1;
-                format!("fn_{}", self.counters.function_counter)
+                // For functions, we need to find their actual scope (not the current scope)
+                // The function itself is declared in the parent scope, but has its own child scope
+                let function_scope_id = self.scope_analyzer.get_scopes()
+                    .iter()
+                    .find(|(sid, _)| sid.starts_with("fn_") && sid.contains(variable_name))
+                    .map(|(sid, _)| sid.clone());
+                
+                if let Some(fn_scope_id) = function_scope_id {
+                    let base_hash = self.hash_function_scope_structure(&fn_scope_id);
+                    
+                    // Check for collisions and add counter if needed
+                    let counter = self.counters.function_hashes.entry(base_hash.clone())
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    
+                    if *counter == 1 {
+                        format!("fn_{}", base_hash)
+                    } else {
+                        format!("fn_{}_{}", base_hash, counter)
+                    }
+                } else {
+                    // Fallback - use sequential numbering
+                    self.counters.function_hashes.entry("fallback".to_string())
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    format!("fn_{}", self.counters.function_hashes["fallback"])
+                }
             }
             VariableKind::Parameter => {
-                self.counters.parameter_counter += 1;
-                format!("param_{}", self.counters.parameter_counter)
+                // Use scope-local counter for parameters
+                let scope_counters = self.counters.scope_counters
+                    .entry(scope_id.to_string())
+                    .or_insert_with(ScopeLocalCounters::default);
+                
+                scope_counters.parameter_counter += 1;
+                format!("param_{}", scope_counters.parameter_counter)
             }
             VariableKind::Var | VariableKind::Let | VariableKind::Const => {
-                self.counters.variable_counter += 1;
-                format!("var_{}", self.counters.variable_counter)
+                // Use scope-local counter for variables
+                let scope_counters = self.counters.scope_counters
+                    .entry(scope_id.to_string())
+                    .or_insert_with(ScopeLocalCounters::default);
+                
+                scope_counters.variable_counter += 1;
+                format!("var_{}", scope_counters.variable_counter)
             }
             VariableKind::ClassDeclaration => {
                 self.counters.class_counter += 1;

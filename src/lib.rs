@@ -40,7 +40,7 @@ pub fn run(args: Args) -> Result<()> {
     
     // Canonicalize
     let mut canonicalizer = Canonicalizer::new(analyzer);
-    canonicalizer.canonicalize()?;
+    canonicalizer.canonicalize(&tree, &source)?;
     
     // Generate output based on mode
     match args.mode() {
