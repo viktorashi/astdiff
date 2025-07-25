@@ -79,11 +79,11 @@ function fn_1(param_1, param_2) {
 ./target/release/varmap minified.js --map
 ```
 ```
-# FIRST LAST TYPE CANONICAL NEW
-1:10 1:10 func fn_7823 fn_7823
-1:12 1:25 param param_1 param_1
-1:14 1:29 param param_2 param_2
-1:21 1:35 var var_1 var_1
+# FIRST LAST TYPE SCOPE CANONICAL NEW
+1:10 1:10 func global fn_7823 fn_7823
+1:12 1:25 param fn_add param_1 param_1
+1:14 1:29 param fn_add param_2 param_2
+1:21 1:35 var fn_add var_1 var_1
 ```
 
 ### Semantic Output (after editing mappings)

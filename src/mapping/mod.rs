@@ -11,6 +11,7 @@ pub struct MappingEntry {
     pub last_line: usize,
     pub last_col: usize,
     pub entry_type: String,         // func, param, var
+    pub scope_id: String,           // scope where variable is defined
     pub original: String,           // original identifier
     pub canonical: String,          // fn_1, param_1, etc.
     pub new_name: String,           // user-editable semantic name
@@ -33,21 +34,23 @@ impl MappingGenerator {
         let mut output = String::new();
         
         // Header
-        output.push_str("# FIRST LAST TYPE CANONICAL NEW\n");
+        output.push_str("# FIRST LAST TYPE SCOPE CANONICAL NEW\n");
         
-        // Collect all identifiers and group by canonical name
-        let mut identifier_groups: HashMap<String, Vec<crate::canonicalizer::IdentifierInfo>> = HashMap::new();
+        // Collect all identifiers and group by (scope, original_name) to ensure uniqueness
+        let mut identifier_groups: HashMap<(String, String), Vec<crate::canonicalizer::IdentifierInfo>> = HashMap::new();
         let canonicalizer_identifiers = self.canonicalizer.extract_all_identifiers(tree.root_node(), &self.source);
         
         for identifier in canonicalizer_identifiers {
-            if let Some(canonical_name) = self.canonicalizer.find_canonical_name(&identifier.text, &identifier.scope_id) {
-                identifier_groups.entry(canonical_name).or_insert_with(Vec::new).push(identifier);
+            if let Some(_canonical_name) = self.canonicalizer.find_canonical_name(&identifier.text, &identifier.scope_id) {
+                // Group by scope and original name to handle variables with same name in different scopes
+                let key = (identifier.scope_id.clone(), identifier.text.clone());
+                identifier_groups.entry(key).or_insert_with(Vec::new).push(identifier);
             }
         }
         
         // Create entries with first and last positions
         let mut entries = Vec::new();
-        for (canonical, identifiers) in identifier_groups {
+        for ((scope_id, original_name), identifiers) in identifier_groups {
             if identifiers.is_empty() {
                 continue;
             }
@@ -56,10 +59,14 @@ impl MappingGenerator {
             let first = identifiers.iter().min_by_key(|id| id.node.start_byte()).unwrap();
             let last = identifiers.iter().max_by_key(|id| id.node.start_byte()).unwrap();
             
+            // Get the canonical name for this identifier
+            let canonical_name = self.canonicalizer.find_canonical_name(&original_name, &scope_id)
+                .unwrap_or_else(|| "unknown".to_string());
+            
             // Determine type from canonical name prefix
-            let entry_type = if canonical.starts_with("fn_") {
+            let entry_type = if canonical_name.starts_with("fn_") {
                 "func".to_string()
-            } else if canonical.starts_with("param_") {
+            } else if canonical_name.starts_with("param_") {
                 "param".to_string()
             } else {
                 "var".to_string()
@@ -71,9 +78,10 @@ impl MappingGenerator {
                 last_line: last.node.start_position().row + 1,
                 last_col: last.node.start_position().column + 1,
                 entry_type,
-                original: identifiers[0].text.clone(),
-                canonical: canonical.clone(),
-                new_name: canonical,
+                scope_id: scope_id.clone(),
+                original: original_name.clone(),
+                canonical: canonical_name.clone(),
+                new_name: canonical_name,
             });
         }
         
@@ -83,12 +91,13 @@ impl MappingGenerator {
         // Format entries
         for entry in entries {
             output.push_str(&format!(
-                "{}:{} {}:{} {} {} {}\n",
+                "{}:{} {}:{} {} {} {} {}\n",
                 entry.first_line,
                 entry.first_col,
                 entry.last_line,
                 entry.last_col,
                 entry.entry_type,
+                entry.scope_id,
                 entry.canonical,
                 entry.new_name
             ));
@@ -106,10 +115,10 @@ impl MappingGenerator {
             }
             
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
-                // Format: first:col last:col type canonical new
-                let canonical = parts[3];
-                let new_name = parts[4];
+            if parts.len() >= 6 {
+                // Format: first:col last:col type scope canonical new
+                let canonical = parts[4];
+                let new_name = parts[5];
                 mappings.insert(canonical.to_string(), new_name.to_string());
             }
         }
