@@ -1,6 +1,6 @@
-# VarMap Diff - Structural JavaScript Comparison
+# ASTDiff - Structural JavaScript Comparison
 
-The `varmap diff` command compares JavaScript files based on their Abstract Syntax Tree (AST) structure rather than text, making it ideal for comparing obfuscated or minified code.
+ASTDiff compares JavaScript files based on their Abstract Syntax Tree (AST) structure rather than text, making it ideal for comparing obfuscated or minified code.
 
 ## How It Works
 
@@ -14,31 +14,31 @@ The `varmap diff` command compares JavaScript files based on their Abstract Synt
 ### Basic Diff (Default - Side by Side)
 Shows full functions before and after with line numbers:
 ```bash
-varmap diff file1.js file2.js
+astdiff file1.js file2.js
 ```
 
 ### Summary Mode
 Shows only what changed without full code:
 ```bash
-varmap diff file1.js file2.js --summary
+astdiff file1.js file2.js --summary
 ```
 
 ### Interleaved Mode
 Shows line-by-line diff of canonicalized code:
 ```bash
-varmap diff file1.js file2.js --interleaved
+astdiff file1.js file2.js --interleaved
 ```
 
 ### Export Rename Mappings
 Capture how functions were renamed between versions:
 ```bash
-varmap diff file1.js file2.js --export-mappings renames.yaml
+astdiff file1.js file2.js --export-mappings renames.yaml
 ```
 
 ### Show Renames
 By default, simple renames are hidden. To see them:
 ```bash
-VARMAP_SHOW_RENAMES=1 varmap diff file1.js file2.js
+ASTDIFF_SHOW_RENAMES=1 astdiff file1.js file2.js
 ```
 
 ## Example
@@ -67,7 +67,7 @@ function a() {
 }
 ```
 
-VarMap diff will:
+ASTDiff will:
 - Recognize that `getData` → `a` but the API endpoint changed (structural modification)
 - Recognize that `processData` → `b` with identical logic (just a rename)
 - Ignore the reordering as non-meaningful

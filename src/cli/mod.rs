@@ -2,105 +2,157 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about = "JavaScript Variable Mapping and Canonicalization Tool", long_about = None)]
+#[clap(author, version, about = "AST-based JavaScript Diff and Code Analysis Tool", long_about = None)]
 pub struct Args {
     #[clap(subcommand)]
     pub command: Option<Command>,
     
-    // Default mode arguments (when no subcommand is used)
-    /// Input JavaScript file (for default canonicalize mode)
-    pub input_file: Option<PathBuf>,
+    // Default diff mode arguments (when no subcommand is used)
+    /// First JavaScript file to compare
+    pub file1: Option<PathBuf>,
     
-    /// Generate mapping template (no file) or apply mappings (with file)
-    #[clap(long, value_name = "FILE")]
-    pub map: Option<Option<PathBuf>>,
+    /// Second JavaScript file to compare
+    pub file2: Option<PathBuf>,
     
-    /// Keep comments in output
+    /// Mapping file for first file
     #[clap(long)]
-    pub preserve_comments: bool,
+    pub map1: Option<PathBuf>,
     
-    /// Pretty print the output with proper indentation
+    /// Mapping file for second file
     #[clap(long)]
-    pub pretty: bool,
+    pub map2: Option<PathBuf>,
     
-    /// Show detailed scope analysis to stderr
+    /// Output format: unified (default), side-by-side, or json
+    #[clap(long, default_value = "unified")]
+    pub format: String,
+    
+    /// Export rename mappings to a file
+    #[clap(long)]
+    pub export_mappings: Option<PathBuf>,
+    
+    /// Show only summary of changes (no detailed diffs)
+    #[clap(long)]
+    pub summary: bool,
+    
+    /// Show interleaved line-by-line diff
+    #[clap(long)]
+    pub interleaved: bool,
+    
+    /// Show detailed analysis to stderr
     #[clap(long)]
     pub verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Compare two JavaScript files structurally
-    Diff {
-        /// First JavaScript file
-        file1: PathBuf,
-        /// Second JavaScript file
-        file2: PathBuf,
-        /// Mapping file for first file
+    /// Canonicalize JavaScript code (normalize variable names)
+    Canon {
+        /// Input JavaScript file
+        input_file: PathBuf,
+        
+        /// Generate mapping template (no file) or apply mappings (with file)
+        #[clap(long, value_name = "FILE")]
+        map: Option<Option<PathBuf>>,
+        
+        /// Keep comments in output
         #[clap(long)]
-        map1: Option<PathBuf>,
-        /// Mapping file for second file
+        preserve_comments: bool,
+        
+        /// Pretty print the output with proper indentation
         #[clap(long)]
-        map2: Option<PathBuf>,
-        /// Output format: unified (default), side-by-side, or json
-        #[clap(long, default_value = "unified")]
-        format: String,
-        /// Export rename mappings to a file
-        #[clap(long)]
-        export_mappings: Option<PathBuf>,
-        /// Show only summary of changes (no detailed diffs)
-        #[clap(long)]
-        summary: bool,
-        /// Show interleaved line-by-line diff
-        #[clap(long)]
-        interleaved: bool,
+        pretty: bool,
     },
 }
 
 impl Args {
     pub fn mode(&self) -> Mode {
-        if let Some(Command::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved }) = &self.command {
-            return Mode::Diff {
-                file1: file1.clone(),
-                file2: file2.clone(),
-                map1: map1.clone(),
-                map2: map2.clone(),
-                format: format.clone(),
-                export_mappings: export_mappings.clone(),
-                summary: *summary,
-                interleaved: *interleaved,
-            };
-        }
-        
-        // Default behavior for backward compatibility
-        match &self.input_file {
-            Some(input_file) => match &self.map {
-                None => Mode::Canonicalize(input_file.clone()),
-                Some(None) => Mode::GenerateMapping(input_file.clone()),
-                Some(Some(path)) => Mode::ApplyMapping(input_file.clone(), path.clone()),
+        match &self.command {
+            Some(Command::Canon { input_file, map, preserve_comments, pretty }) => {
+                match map {
+                    None => Mode::Canonicalize {
+                        input_file: input_file.clone(),
+                        preserve_comments: *preserve_comments,
+                        pretty: *pretty,
+                    },
+                    Some(None) => Mode::GenerateMapping {
+                        input_file: input_file.clone(),
+                        preserve_comments: *preserve_comments,
+                        pretty: *pretty,
+                    },
+                    Some(Some(path)) => Mode::ApplyMapping {
+                        input_file: input_file.clone(),
+                        map_file: path.clone(),
+                        preserve_comments: *preserve_comments,
+                        pretty: *pretty,
+                    },
+                }
             },
             None => {
-                eprintln!("Error: No input file provided");
-                eprintln!("\nUsage:");
-                eprintln!("  varmap <INPUT_FILE>                # Canonicalize JavaScript");
-                eprintln!("  varmap <INPUT_FILE> --map          # Generate mapping template");
-                eprintln!("  varmap <INPUT_FILE> --map MAP_FILE # Apply mappings");
-                eprintln!("  varmap diff FILE1 FILE2            # Compare two JavaScript files");
-                eprintln!("\nFor more information, run: varmap --help");
-                std::process::exit(1);
+                // Default is diff mode
+                match (&self.file1, &self.file2) {
+                    (Some(file1), Some(file2)) => Mode::Diff {
+                        file1: file1.clone(),
+                        file2: file2.clone(),
+                        map1: self.map1.clone(),
+                        map2: self.map2.clone(),
+                        format: self.format.clone(),
+                        export_mappings: self.export_mappings.clone(),
+                        summary: self.summary,
+                        interleaved: self.interleaved,
+                    },
+                    _ => {
+                        eprintln!("Error: Two files required for diff");
+                        eprintln!("\nUsage:");
+                        eprintln!("  astdiff FILE1 FILE2                    # Compare two JavaScript files");
+                        eprintln!("  astdiff FILE1 FILE2 --summary          # Show only summary of changes");
+                        eprintln!("  astdiff FILE1 FILE2 --interleaved     # Show interleaved diff");
+                        eprintln!("  astdiff canon INPUT_FILE               # Canonicalize JavaScript");
+                        eprintln!("  astdiff canon INPUT_FILE --map         # Generate mapping template");
+                        eprintln!("  astdiff canon INPUT_FILE --map MAP.yaml # Apply mappings");
+                        eprintln!("\nFor more information, run: astdiff --help");
+                        std::process::exit(1);
+                    }
+                }
             }
+        }
+    }
+    
+    pub fn preserve_comments(&self) -> bool {
+        match &self.command {
+            Some(Command::Canon { preserve_comments, .. }) => *preserve_comments,
+            None => false,
+        }
+    }
+    
+    pub fn pretty(&self) -> bool {
+        match &self.command {
+            Some(Command::Canon { pretty, .. }) => *pretty,
+            None => false,
         }
     }
 }
 
 #[derive(Debug)]
 pub enum Mode {
-    /// Default mode: output canonicalized JavaScript
-    Canonicalize(PathBuf),
+    /// Canonicalize JavaScript (normalize variable names)
+    Canonicalize {
+        input_file: PathBuf,
+        preserve_comments: bool,
+        pretty: bool,
+    },
     /// Generate mapping template for editing
-    GenerateMapping(PathBuf),
+    GenerateMapping {
+        input_file: PathBuf,
+        preserve_comments: bool,
+        pretty: bool,
+    },
     /// Apply edited mappings to create semantic version
-    ApplyMapping(PathBuf, PathBuf),
+    ApplyMapping {
+        input_file: PathBuf,
+        map_file: PathBuf,
+        preserve_comments: bool,
+        pretty: bool,
+    },
     /// Diff two JavaScript files structurally
     Diff {
         file1: PathBuf,

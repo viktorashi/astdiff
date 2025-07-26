@@ -181,12 +181,12 @@ impl Canonicalizer {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name_pos = name_node.start_position();
                     if name_pos.column == column {
-                        if std::env::var("VARMAP_DEBUG").is_ok() {
+                        if std::env::var("ASTDIFF_DEBUG").is_ok() {
                             eprintln!("Found function node at {}:{} (name at {}:{})", 
                                 pos.row, pos.column, name_pos.row, name_pos.column);
                         }
                         return Some(node);
-                    } else if std::env::var("VARMAP_DEBUG").is_ok() {
+                    } else if std::env::var("ASTDIFF_DEBUG").is_ok() {
                         eprintln!("Function at line {}: name at column {} (expected {})", 
                             pos.row, name_pos.column, column);
                     }

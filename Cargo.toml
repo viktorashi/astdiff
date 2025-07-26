@@ -1,10 +1,14 @@
 [package]
-name = "varmap"
-version = "0.1.0"
+name = "astdiff"
+version = "0.2.0"
 edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
-description = "JavaScript Variable Mapping and Canonicalization Tool"
+description = "AST-based JavaScript Diff and Code Analysis Tool"
 license = "MIT"
+
+[[bin]]
+name = "astdiff"
+path = "src/main.rs"
 
 [dependencies]
 tree-sitter = "0.20"

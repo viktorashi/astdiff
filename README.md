@@ -1,13 +1,15 @@
-# VarMap: JavaScript Variable Mapping and Canonicalization Tool
+# ASTDiff: AST-based JavaScript Diff and Code Analysis Tool
 
-A Rust-based tool that analyzes JavaScript code to create canonical variable mappings, enabling semantic comparison of code where identifiers have been renamed (e.g., minified JavaScript with randomized variable names).
+A Rust-based tool that compares JavaScript files using Abstract Syntax Tree (AST) analysis, enabling meaningful comparison of code regardless of variable names, formatting, or code reordering. Perfect for analyzing minified, obfuscated, or refactored JavaScript.
 
 ## Features
 
-- **Scope Analysis**: Parse JavaScript using tree-sitter to build a complete scope tree
-- **Canonicalization**: Rename all identifiers to canonical forms based on scope and declaration order  
-- **Mapping Generation**: Create bidirectional mappings between original and canonical names
-- **Multiple Modes**: Support canonical output, mapping generation, and semantic renaming
+- **Structural Diff**: Compare JavaScript files based on AST structure, not text
+- **Smart Matching**: Automatically matches renamed functions and variables
+- **Flexible Output**: Side-by-side, summary, or interleaved diff formats
+- **Canonicalization**: Normalize variable names for consistent comparison
+- **Mapping Support**: Generate and apply custom variable name mappings
+- **Performance**: Optimized with size-based sorting and MinHash LSH
 
 ## Installation
 
@@ -17,55 +19,94 @@ cargo build --release
 
 ## Usage
 
-### Basic Canonicalization
+### Basic Structural Diff (Default)
 
-Convert JavaScript to canonical form for structural comparison:
+Compare two JavaScript files to see what actually changed:
 
 ```bash
-# Canonicalize for diffing
-./target/release/varmap input.js > canonical.js
+# Show side-by-side comparison of modified functions
+astdiff file1.js file2.js
 
-# Compare two versions structurally  
-./target/release/varmap version1.min.js > canonical1.js
-./target/release/varmap version2.min.js > canonical2.js
-diff canonical1.js canonical2.js
+# Show only summary of changes
+astdiff file1.js file2.js --summary
+
+# Show interleaved line-by-line diff
+astdiff file1.js file2.js --interleaved
+
+# Export rename mappings
+astdiff file1.js file2.js --export-mappings renames.yaml
 ```
 
-### Generate Mapping Template
+### Canonicalization
 
-Create a mapping file for manual editing:
-
-```bash
-./target/release/varmap input.js --map > mappings.map
-```
-
-### Apply Custom Mappings
-
-Use edited mapping file to create semantic JavaScript:
+Convert JavaScript to canonical form with normalized variable names:
 
 ```bash
-# Edit mappings.map to change NEW_NAME column to semantic names
-./target/release/varmap input.js --map mappings.map > readable.js
+# Basic canonicalization
+astdiff canon input.js > canonical.js
+
+# Pretty print the output
+astdiff canon input.js --pretty
+
+# Generate mapping template
+astdiff canon input.js --map > mappings.yaml
+
+# Apply custom mappings
+astdiff canon input.js --map mappings.yaml > semantic.js
 ```
 
 ## Examples
 
-### Input (minified.js)
+### Structural Diff Example
+
+Given two files where functions are renamed and reordered:
+
+**file1.js:**
+```javascript
+function getData() {
+    return fetch('/api/data');
+}
+
+function processData(data) {
+    return data.map(item => item.value * 2);
+}
+```
+
+**file2.js:**
+```javascript
+function b(x) {
+    return x.map(y => y.value * 2);
+}
+
+function a() {
+    return fetch('/api/v2/data'); // Changed!
+}
+```
+
+Running `astdiff file1.js file2.js` will show:
+
+- `getData` → `a` with structural modification (API endpoint changed)
+- `processData` → `b` with no structural changes (just renamed)
+- Reordering is ignored as non-meaningful
+
+### Canonicalization Example
+
+**Input (minified.js):**
 ```javascript
 function a(b,c){var d=b+c;return d;}
 ```
 
-### Canonical Output
+**Canonical Output:**
 ```bash
-./target/release/varmap minified.js
+astdiff canon minified.js
 ```
 ```javascript
 function fn_1(param_1,param_2){var var_1=param_1+param_2;return var_1;}
 ```
 
-### Pretty Printed Output
+**Pretty Printed:**
 ```bash
-./target/release/varmap minified.js --pretty
+astdiff canon minified.js --pretty
 ```
 ```javascript
 function fn_1(param_1, param_2) {
@@ -74,86 +115,68 @@ function fn_1(param_1, param_2) {
 }
 ```
 
-### Mapping Template
-```bash
-./target/release/varmap minified.js --map
-```
-```
-# FIRST LAST TYPE SCOPE CANONICAL NEW
-1:10 1:10 func global fn_7823 fn_7823
-1:12 1:25 param fn_add param_1 param_1
-1:14 1:29 param fn_add param_2 param_2
-1:21 1:35 var fn_add var_1 var_1
-```
-
-### Semantic Output (after editing mappings)
-After editing the NEW column in the mapping file:
-```javascript
-function addNumbers(firstNumber,secondNumber){var sum=firstNumber+secondNumber;return sum;}
-```
-
-### Pretty Printed Semantic Output
-```bash
-./target/release/varmap minified.js --map mappings.map --pretty
-```
-```javascript
-function addNumbers(firstNumber, secondNumber) {
-  var sum = firstNumber + secondNumber;
-  return sum;
-}
-```
-
 ## Command Line Options
 
+### Diff Mode (Default)
 ```
-varmap [OPTIONS] <input-file>
+astdiff [OPTIONS] <file1> <file2>
 
 OPTIONS:
-  --map [file]           Generate mapping template (no file) or apply mappings (with file)
-  --preserve-comments    Keep comments in output (not yet implemented)
-  --pretty              Pretty print the output with proper indentation
-  --verbose             Show detailed scope analysis to stderr
+  --map1 <FILE>           Mapping file for first file
+  --map2 <FILE>           Mapping file for second file  
+  --format <FORMAT>       Output format: unified (default), side-by-side, json
+  --export-mappings <FILE> Export rename mappings to file
+  --summary              Show only summary of changes
+  --interleaved          Show interleaved line-by-line diff
+  --verbose              Show detailed analysis
+  -h, --help             Show help
+```
+
+### Canon Subcommand
+```
+astdiff canon [OPTIONS] <input-file>
+
+OPTIONS:
+  --map [FILE]           Generate mapping template (no file) or apply mappings (with file)
+  --preserve-comments    Keep comments in output
+  --pretty              Pretty print the output
   -h, --help            Show help
 ```
 
 ## Use Cases
 
-- **Code Analysis**: Compare different versions of minified JavaScript
-- **Reverse Engineering**: Analyze obfuscated code changes over time  
-- **Security Research**: Create semantic diffs that ignore variable name randomization
-- **LLM Integration**: Generate mapping templates for AI-assisted variable renaming
+- **Security Analysis**: Compare obfuscated malware samples to identify changes
+- **Build Verification**: Ensure minified code matches the source
+- **Code Review**: Focus on actual logic changes, not formatting
+- **Reverse Engineering**: Track changes between obfuscated versions
+- **Refactoring**: Verify that refactoring preserved functionality
 
-## Architecture
+## How It Works
 
-The tool consists of four main components:
-
-1. **Parser Module**: Uses tree-sitter-javascript for robust JavaScript parsing
-2. **Scope Analyzer**: Tracks variable bindings and scope relationships
-3. **Canonicalizer**: Applies structural hashing for functions and scope-local naming
-4. **Mapping Generator**: Creates and applies variable mappings
+1. **Structural Hashing**: Computes hashes of AST nodes while ignoring identifiers
+2. **Declaration Extraction**: Identifies functions, variables, classes, imports, and exports
+3. **Similarity Matching**: Uses Jaccard index to find matching declarations
+4. **Optimized Search**: Size-based sorting and MinHash LSH for O(n log n) performance
 
 ## Supported JavaScript Features
 
 - Function declarations and expressions
 - Arrow functions  
 - Variable declarations (var, let, const)
-- Function parameters
-- Destructuring patterns (object and array)
-- Loop variables (for-in, for-of)
-- Catch clause parameters
+- Classes and methods
 - Import/export statements
-- Nested scopes
-- Block scoping
-- Classes (basic support)
+- Destructuring patterns
+- Object and array literals
+- All standard JavaScript syntax
 
 ## Contributing
 
-This is a research/educational implementation. Contributions welcome for:
+Contributions welcome for:
 
 - TypeScript support
-- Improved error handling
-- More JavaScript features
-- Performance optimizations
+- Additional output formats
+- More sophisticated matching algorithms
+- Performance improvements
 
 ## License
 

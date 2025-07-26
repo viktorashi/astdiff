@@ -1,6 +1,6 @@
 use clap::Parser;
 use anyhow::Result;
-use varmap::{Args, run};
+use astdiff::{Args, run};
 
 fn main() -> Result<()> {
     let args = Args::parse();

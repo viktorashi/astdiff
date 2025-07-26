@@ -21,19 +21,19 @@ pub fn run(args: Args) -> Result<()> {
         Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved } => {
             run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, args.verbose)
         }
-        Mode::Canonicalize(input_file) => {
-            run_canonicalize(&input_file, &args)
+        Mode::Canonicalize { input_file, preserve_comments, pretty } => {
+            run_canonicalize(&input_file, preserve_comments, pretty, args.verbose)
         }
-        Mode::GenerateMapping(input_file) => {
-            run_generate_mapping(&input_file, &args)
+        Mode::GenerateMapping { input_file, preserve_comments, pretty } => {
+            run_generate_mapping(&input_file, preserve_comments, pretty, args.verbose)
         }
-        Mode::ApplyMapping(input_file, map_file) => {
-            run_apply_mapping(&input_file, &map_file, &args)
+        Mode::ApplyMapping { input_file, map_file, preserve_comments, pretty } => {
+            run_apply_mapping(&input_file, &map_file, preserve_comments, pretty, args.verbose)
         }
     }
 }
 
-fn run_canonicalize(input_file: &std::path::PathBuf, args: &Args) -> Result<()> {
+fn run_canonicalize(input_file: &std::path::PathBuf, _preserve_comments: bool, pretty: bool, verbose: bool) -> Result<()> {
     let source = fs::read_to_string(input_file)?;
     let mut parser = JsParser::new()?;
     let tree = parser.parse(&source)?;
@@ -41,7 +41,7 @@ fn run_canonicalize(input_file: &std::path::PathBuf, args: &Args) -> Result<()> 
     let mut analyzer = ScopeAnalyzer::new();
     analyzer.analyze(tree.root_node(), &source)?;
     
-    if args.verbose {
+    if verbose {
         print_scope_analysis(&analyzer);
     }
     
@@ -49,7 +49,7 @@ fn run_canonicalize(input_file: &std::path::PathBuf, args: &Args) -> Result<()> 
     canonicalizer.canonicalize(&tree, &source)?;
     
     let canonical = canonicalizer.apply_canonicalization(&tree, &source)?;
-    if args.pretty {
+    if pretty {
         let pretty_printer = PrettyPrinter::new();
         let mut parser = JsParser::new()?;
         let canonical_tree = parser.parse(&canonical)?;
@@ -62,7 +62,7 @@ fn run_canonicalize(input_file: &std::path::PathBuf, args: &Args) -> Result<()> 
     Ok(())
 }
 
-fn run_generate_mapping(input_file: &std::path::PathBuf, args: &Args) -> Result<()> {
+fn run_generate_mapping(input_file: &std::path::PathBuf, _preserve_comments: bool, _pretty: bool, verbose: bool) -> Result<()> {
     let source = fs::read_to_string(input_file)?;
     let mut parser = JsParser::new()?;
     let tree = parser.parse(&source)?;
@@ -70,7 +70,7 @@ fn run_generate_mapping(input_file: &std::path::PathBuf, args: &Args) -> Result<
     let mut analyzer = ScopeAnalyzer::new();
     analyzer.analyze(tree.root_node(), &source)?;
     
-    if args.verbose {
+    if verbose {
         print_scope_analysis(&analyzer);
     }
     
@@ -84,7 +84,7 @@ fn run_generate_mapping(input_file: &std::path::PathBuf, args: &Args) -> Result<
     Ok(())
 }
 
-fn run_apply_mapping(input_file: &std::path::PathBuf, map_file: &std::path::PathBuf, args: &Args) -> Result<()> {
+fn run_apply_mapping(input_file: &std::path::PathBuf, map_file: &std::path::PathBuf, _preserve_comments: bool, pretty: bool, verbose: bool) -> Result<()> {
     let source = fs::read_to_string(input_file)?;
     let mut parser = JsParser::new()?;
     let tree = parser.parse(&source)?;
@@ -92,7 +92,7 @@ fn run_apply_mapping(input_file: &std::path::PathBuf, map_file: &std::path::Path
     let mut analyzer = ScopeAnalyzer::new();
     analyzer.analyze(tree.root_node(), &source)?;
     
-    if args.verbose {
+    if verbose {
         print_scope_analysis(&analyzer);
     }
     
@@ -104,7 +104,7 @@ fn run_apply_mapping(input_file: &std::path::PathBuf, map_file: &std::path::Path
     let generator = MappingGenerator::new(canonicalizer, source.clone());
     let output = generator.apply_mappings(&tree, mappings)?;
     
-    if args.pretty {
+    if pretty {
         let pretty_printer = PrettyPrinter::new();
         let mut parser = JsParser::new()?;
         let output_tree = parser.parse(&output)?;

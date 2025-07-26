@@ -702,8 +702,8 @@ impl StructuralDiff {
         }
         
         // Optionally show renames in verbose mode
-        if !renames.is_empty() && std::env::var("VARMAP_SHOW_RENAMES").is_ok() {
-            println!("=== Renamed Functions (set VARMAP_SHOW_RENAMES to see) ===");
+        if !renames.is_empty() && std::env::var("ASTDIFF_SHOW_RENAMES").is_ok() {
+            println!("=== Renamed Functions (set ASTDIFF_SHOW_RENAMES to see) ===");
             for change in renames {
                 if let Some(path) = change.structural_path.split("->").nth(1) {
                     println!("  {} -> {}", 
@@ -801,7 +801,7 @@ impl StructuralDiff {
         }
         
         // Optionally show renames
-        if !renames.is_empty() && std::env::var("VARMAP_SHOW_RENAMES").is_ok() {
+        if !renames.is_empty() && std::env::var("ASTDIFF_SHOW_RENAMES").is_ok() {
             println!("=== Renamed Functions ===");
             for change in renames {
                 if let Some(path) = change.structural_path.split("->").nth(1) {
@@ -983,7 +983,7 @@ impl StructuralDiff {
         }
         
         // Optionally show renames
-        if !renames.is_empty() && std::env::var("VARMAP_SHOW_RENAMES").is_ok() {
+        if !renames.is_empty() && std::env::var("ASTDIFF_SHOW_RENAMES").is_ok() {
             println!("=== Renamed Functions ===");
             for change in renames {
                 if let Some(path) = change.structural_path.split("->").nth(1) {
