@@ -178,14 +178,14 @@ fn run_diff(
     match format.as_str() {
         "unified" => {
             if summary {
-                diff.print_summary(&result, &file1, &file2)
+                diff.print_summary(&result, &file1, &file2, &source1, &source2)
             } else if interleaved {
-                diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref())?
+                diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref(), &source1, &source2)?
             } else {
                 diff.print_side_by_side_full(&result, &file1, &file2, &source1, &source2)?
             }
         }
-        "side-by-side" => diff.print_side_by_side(&result),
+        "side-by-side" => diff.print_side_by_side(&result, &file1, &file2, &source1, &source2),
         "json" => diff.print_json(&result)?,
         _ => anyhow::bail!("Unknown format: {}", format),
     }

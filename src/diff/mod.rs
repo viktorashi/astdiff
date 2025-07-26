@@ -73,6 +73,97 @@ impl StructuralDiff {
         }
     }
     
+    fn calculate_line_statistics(&self, result: &DiffResult, source1: &str, source2: &str) -> (usize, usize, usize, usize) {
+        let mut lines_added = 0;
+        let mut lines_removed = 0;
+        let mut lines_changed = 0;
+        
+        let mut processed_lines1 = HashSet::new();
+        let mut processed_lines2 = HashSet::new();
+        
+        for change in &result.changes {
+            match change.change_type {
+                ChangeType::Addition => {
+                    if let Some(loc) = &change.location2 {
+                        let lines = self.count_declaration_lines(loc.line, source2);
+                        if !processed_lines2.contains(&loc.line) {
+                            lines_added += lines;
+                            processed_lines2.insert(loc.line);
+                        }
+                    }
+                }
+                ChangeType::Deletion => {
+                    if let Some(loc) = &change.location1 {
+                        let lines = self.count_declaration_lines(loc.line, source1);
+                        if !processed_lines1.contains(&loc.line) {
+                            lines_removed += lines;
+                            processed_lines1.insert(loc.line);
+                        }
+                    }
+                }
+                ChangeType::Modification => {
+                    if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                        if !change.description.contains("moved from line") {
+                            let lines1 = self.count_declaration_lines(loc1.line, source1);
+                            let lines2 = self.count_declaration_lines(loc2.line, source2);
+                            if !processed_lines1.contains(&loc1.line) && !processed_lines2.contains(&loc2.line) {
+                                lines_changed += lines1.max(lines2);
+                                processed_lines1.insert(loc1.line);
+                                processed_lines2.insert(loc2.line);
+                            }
+                        }
+                    }
+                }
+                ChangeType::Reorder => {} // Don't count reorders in line statistics
+            }
+        }
+        
+        let total_diff_size = lines_added + lines_removed + lines_changed;
+        (lines_added, lines_removed, lines_changed, total_diff_size)
+    }
+    
+    fn count_declaration_lines(&self, start_line: usize, source: &str) -> usize {
+        let lines: Vec<&str> = source.lines().collect();
+        if start_line == 0 || start_line > lines.len() {
+            return 1;
+        }
+        
+        let first_line = lines[start_line - 1];
+        
+        // For simple declarations, just count as 1 line
+        if first_line.trim().ends_with(',') || first_line.trim().ends_with(';') {
+            return 1;
+        }
+        
+        // For functions/classes, count until closing brace
+        let mut end_line = start_line;
+        let mut brace_count = 0;
+        let mut found_open = false;
+        
+        for (i, line) in lines.iter().enumerate().skip(start_line - 1) {
+            if line.contains('{') {
+                brace_count += line.matches('{').count();
+                found_open = true;
+            }
+            if line.contains('}') {
+                brace_count -= line.matches('}').count();
+            }
+            
+            if found_open && brace_count == 0 {
+                end_line = i + 1;
+                break;
+            }
+            
+            // For arrow functions without braces
+            if i == start_line - 1 && line.contains("=>") && !line.contains("{") {
+                end_line = i + 1;
+                break;
+            }
+        }
+        
+        end_line - start_line + 1
+    }
+    
     pub fn set_mappings1(&mut self, mappings: HashMap<String, String>) {
         self.mappings1 = Some(mappings);
     }
@@ -634,12 +725,17 @@ impl StructuralDiff {
         }
     }
     
-    pub fn print_summary(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf) {
+    pub fn print_summary(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf, 
+                         source1: &str, source2: &str) {
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
         println!("Matched declarations: {}/{} vs {}", 
                  result.matched_declarations, result.total_declarations1, result.total_declarations2);
+        
+        // Calculate and print line statistics
+        let (lines_added, lines_removed, lines_changed, total_diff) = self.calculate_line_statistics(result, source1, source2);
+        println!("Lines: +{} -{} ~{} (total: {} lines)", lines_added, lines_removed, lines_changed, total_diff);
         
         // Group changes by type
         let mut additions = Vec::new();
@@ -721,12 +817,16 @@ impl StructuralDiff {
     }
     
     pub fn print_interleaved(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf, 
-                             canonical1: Option<&str>, canonical2: Option<&str>) -> Result<()> {
+                             canonical1: Option<&str>, canonical2: Option<&str>, source1: &str, source2: &str) -> Result<()> {
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
         println!("Matched declarations: {}/{} vs {}", 
                  result.matched_declarations, result.total_declarations1, result.total_declarations2);
+        
+        // Calculate and print line statistics
+        let (lines_added, lines_removed, lines_changed, total_diff) = self.calculate_line_statistics(result, source1, source2);
+        println!("Lines: +{} -{} ~{} (total: {} lines)", lines_added, lines_removed, lines_changed, total_diff);
         
         // Group changes by type
         let mut additions = Vec::new();
@@ -919,6 +1019,10 @@ impl StructuralDiff {
         println!("Matched declarations: {}/{} vs {}", 
                  result.matched_declarations, result.total_declarations1, result.total_declarations2);
         
+        // Calculate and print line statistics
+        let (lines_added, lines_removed, lines_changed, total_diff) = self.calculate_line_statistics(result, source1, source2);
+        println!("Lines: +{} -{} ~{} (total: {} lines)", lines_added, lines_removed, lines_changed, total_diff);
+        
         // Group changes by type
         let mut additions = Vec::new();
         let mut deletions = Vec::new();
@@ -1054,11 +1158,12 @@ impl StructuralDiff {
         }
     }
     
-    pub fn print_side_by_side(&self, result: &DiffResult) {
+    pub fn print_side_by_side(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
+                               source1: &str, source2: &str) {
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
         println!();
         // Simplified implementation
-        self.print_summary(result, &std::path::PathBuf::from("file1"), &std::path::PathBuf::from("file2"));
+        self.print_summary(result, file1, file2, source1, source2);
     }
     
     pub fn print_json(&self, result: &DiffResult) -> Result<()> {
