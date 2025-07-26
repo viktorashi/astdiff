@@ -152,6 +152,11 @@ impl StructuralDiff {
                 // Extract all variable declarators
                 for child in node.children(&mut node.walk()) {
                     if child.kind() == "variable_declarator" {
+                        // Skip variables without initialization - they don't provide meaningful information
+                        if child.child_by_field_name("value").is_none() {
+                            continue;
+                        }
+                        
                         if let Some(name_node) = child.child_by_field_name("name") {
                             if name_node.kind() == "identifier" {
                                 let name = &source[name_node.byte_range()];
@@ -744,7 +749,7 @@ impl StructuralDiff {
             }
         }
         
-        let meaningful_changes = additions.len() + deletions.len() + structural_changes.len();
+        let _meaningful_changes = additions.len() + deletions.len() + structural_changes.len();
         println!("Changes: {} additions, {} deletions, {} modifications (+ {} renames)", 
                  additions.len(), deletions.len(), structural_changes.len(), renames.len());
         println!();
@@ -855,7 +860,7 @@ impl StructuralDiff {
         let mut brace_count = 0;
         let mut in_function = false;
         
-        for (i, line) in lines.iter().enumerate().skip(start_line - 1) {
+        for (_i, line) in lines.iter().enumerate().skip(start_line - 1) {
             result.push(line.to_string());
             
             if line.contains('{') {
@@ -1001,6 +1006,22 @@ impl StructuralDiff {
     fn print_original_function(&self, source: &str, start_line: usize, prefix: &str) {
         let lines: Vec<&str> = source.lines().collect();
         if start_line > 0 && start_line <= lines.len() {
+            // For simple variable declarations without initialization, just print the line
+            let first_line = lines[start_line - 1];
+            
+            // Check if this is a simple variable declaration (contains var/let/const but no '=' or arrow function)
+            let is_simple_var_decl = (first_line.trim_start().starts_with("var ") || 
+                                      first_line.trim_start().starts_with("let ") || 
+                                      first_line.trim_start().starts_with("const ")) &&
+                                     !first_line.contains('=') && 
+                                     !first_line.contains("=>");
+            
+            if is_simple_var_decl || first_line.trim().ends_with(',') || first_line.trim().ends_with(';') {
+                // For simple variable declarations, just print the single line
+                println!("{}{:4} {}", prefix, start_line, first_line);
+                return;
+            }
+            
             // Find the function boundaries
             let mut end_line = start_line;
             let mut brace_count = 0;
