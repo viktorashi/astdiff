@@ -18,6 +18,8 @@ struct Declaration {
     line: usize,
     signature: String,
     structural_hashes: HashSet<String>,
+    size: usize,
+    minhash_signature: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +115,22 @@ impl StructuralDiff {
         declarations
     }
     
+    fn create_declaration(&self, name: String, kind: DeclarationKind, node: Node<'static>, 
+                         line: usize, signature: String, structural_hashes: HashSet<String>) -> Declaration {
+        let size = structural_hashes.len();
+        let minhash_signature = self.compute_minhash(&structural_hashes, 128);
+        Declaration {
+            name,
+            kind,
+            node,
+            line,
+            signature,
+            structural_hashes,
+            size,
+            minhash_signature,
+        }
+    }
+    
     fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
         match node.kind() {
             "function_declaration" => {
@@ -120,14 +138,14 @@ impl StructuralDiff {
                     let name = &source[name_node.byte_range()];
                     let signature = self.get_function_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
-                    declarations.push(Declaration {
-                        name: name.to_string(),
-                        kind: DeclarationKind::Function,
-                        node: unsafe { std::mem::transmute(node) },
-                        line: node.start_position().row + 1,
+                    declarations.push(self.create_declaration(
+                        name.to_string(),
+                        DeclarationKind::Function,
+                        unsafe { std::mem::transmute(node) },
+                        node.start_position().row + 1,
                         signature,
                         structural_hashes,
-                    });
+                    ));
                 }
             }
             "variable_declaration" if is_global => {
@@ -143,14 +161,14 @@ impl StructuralDiff {
                                 } else {
                                     HashSet::new()
                                 };
-                                declarations.push(Declaration {
-                                    name: name.to_string(),
-                                    kind: DeclarationKind::Variable,
-                                    node: unsafe { std::mem::transmute(child) },
-                                    line: child.start_position().row + 1,
+                                declarations.push(self.create_declaration(
+                                    name.to_string(),
+                                    DeclarationKind::Variable,
+                                    unsafe { std::mem::transmute(child) },
+                                    child.start_position().row + 1,
                                     signature,
                                     structural_hashes,
-                                });
+                                ));
                             }
                         }
                     }
@@ -161,27 +179,27 @@ impl StructuralDiff {
                     let name = &source[name_node.byte_range()];
                     let signature = self.get_class_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
-                    declarations.push(Declaration {
-                        name: name.to_string(),
-                        kind: DeclarationKind::Class,
-                        node: unsafe { std::mem::transmute(node) },
-                        line: node.start_position().row + 1,
+                    declarations.push(self.create_declaration(
+                        name.to_string(),
+                        DeclarationKind::Class,
+                        unsafe { std::mem::transmute(node) },
+                        node.start_position().row + 1,
                         signature,
                         structural_hashes,
-                    });
+                    ));
                 }
             }
             "import_statement" => {
                 let signature = self.get_import_signature(node, source);
                 let structural_hashes = self.collect_structural_hashes(node, source);
-                declarations.push(Declaration {
-                    name: format!("import@{}", node.start_position().row),
-                    kind: DeclarationKind::Import,
-                    node: unsafe { std::mem::transmute(node) },
-                    line: node.start_position().row + 1,
+                declarations.push(self.create_declaration(
+                    format!("import@{}", node.start_position().row),
+                    DeclarationKind::Import,
+                    unsafe { std::mem::transmute(node) },
+                    node.start_position().row + 1,
                     signature,
                     structural_hashes,
-                });
+                ));
             }
             "export_statement" => {
                 if let Some(decl) = node.child_by_field_name("declaration") {
@@ -189,14 +207,14 @@ impl StructuralDiff {
                 } else {
                     let signature = self.get_export_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
-                    declarations.push(Declaration {
-                        name: format!("export@{}", node.start_position().row),
-                        kind: DeclarationKind::Export,
-                        node: unsafe { std::mem::transmute(node) },
-                        line: node.start_position().row + 1,
+                    declarations.push(self.create_declaration(
+                        format!("export@{}", node.start_position().row),
+                        DeclarationKind::Export,
+                        unsafe { std::mem::transmute(node) },
+                        node.start_position().row + 1,
                         signature,
                         structural_hashes,
-                    });
+                    ));
                 }
             }
             _ => {
@@ -364,36 +382,119 @@ impl StructuralDiff {
         }
     }
     
+    fn compute_minhash(&self, hashes: &HashSet<String>, num_hashes: usize) -> Vec<u64> {
+        let mut signature = vec![u64::MAX; num_hashes];
+        
+        for hash_str in hashes {
+            for i in 0..num_hashes {
+                let hash_value = self.hash_with_seed(hash_str, i);
+                signature[i] = signature[i].min(hash_value);
+            }
+        }
+        
+        signature
+    }
+    
+    fn hash_with_seed(&self, value: &str, seed: usize) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        seed.hash(&mut hasher);
+        hasher.finish()
+    }
+    
+    fn estimate_minhash_similarity(&self, sig1: &[u64], sig2: &[u64]) -> f64 {
+        let matches = sig1.iter().zip(sig2).filter(|(a, b)| a == b).count();
+        matches as f64 / sig1.len() as f64
+    }
+    
     fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
         -> (Vec<(usize, usize)>, Vec<Change>) {
+        // Sort declarations by size while keeping original indices
+        let mut sorted1: Vec<(usize, &Declaration)> = decls1.iter().enumerate()
+            .map(|(i, d)| (i, d))
+            .collect();
+        sorted1.sort_by_key(|(_, d)| d.size);
+        
+        let mut sorted2: Vec<(usize, &Declaration)> = decls2.iter().enumerate()
+            .map(|(i, d)| (i, d))
+            .collect();
+        sorted2.sort_by_key(|(_, d)| d.size);
+        
         let mut matches = Vec::new();
         let mut changes = Vec::new();
         let mut matched1 = vec![false; decls1.len()];
         let mut matched2 = vec![false; decls2.len()];
         
-        // Calculate similarity scores for all pairs
-        let mut similarities = Vec::new();
-        for (i, decl1) in decls1.iter().enumerate() {
-            for (j, decl2) in decls2.iter().enumerate() {
-                let similarity = self.calculate_declaration_similarity(decl1, decl2, source1, source2);
-                if similarity > 0.0 {
-                    similarities.push((i, j, similarity));
+        let mut j_start = 0; // Track where size window starts for efficiency
+        
+        // Process declarations in size order
+        for (i1, decl1) in &sorted1 {
+            if matched1[*i1] {
+                continue;
+            }
+            
+            // Find size window in sorted2 (within 30% size difference)
+            let min_size = ((decl1.size as f64) * 0.7).max(1.0) as usize;
+            let max_size = ((decl1.size as f64) * 1.3) as usize;
+            
+            // Move j_start forward until we're in range
+            while j_start < sorted2.len() && sorted2[j_start].1.size < min_size {
+                j_start += 1;
+            }
+            
+            // Collect candidates using LSH within size window
+            let mut candidates = Vec::new();
+            for j in j_start..sorted2.len() {
+                let (i2, decl2) = &sorted2[j];
+                
+                if decl2.size > max_size {
+                    break; // Past the size window
+                }
+                
+                if matched2[*i2] || decl1.kind != decl2.kind {
+                    continue;
+                }
+                
+                // Quick LSH filter
+                let estimated_sim = self.estimate_minhash_similarity(
+                    &decl1.minhash_signature,
+                    &decl2.minhash_signature
+                );
+                
+                if estimated_sim >= 0.3 { // Lower threshold for LSH
+                    candidates.push((*i2, estimated_sim));
                 }
             }
-        }
-        
-        // Sort by similarity (highest first)
-        similarities.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-        
-        // Greedy matching
-        for (i, j, similarity) in similarities {
-            if !matched1[i] && !matched2[j] && similarity >= 0.5 {
-                matched1[i] = true;
-                matched2[j] = true;
-                matches.push((i, j));
+            
+            // Sort candidates by LSH similarity
+            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            
+            // Check top candidates with full similarity
+            let mut best_match = None;
+            let mut best_similarity = 0.0;
+            
+            for (i2, _lsh_sim) in candidates.iter().take(5) { // Only check top 5
+                let decl2 = &decls2[*i2];
+                let full_similarity = self.calculate_declaration_similarity(decl1, decl2, source1, source2);
                 
-                let decl1 = &decls1[i];
-                let decl2 = &decls2[j];
+                if full_similarity >= 0.5 && full_similarity > best_similarity {
+                    best_match = Some(*i2);
+                    best_similarity = full_similarity;
+                    
+                    // Early termination for very good matches
+                    if full_similarity >= 0.95 {
+                        break;
+                    }
+                }
+            }
+            
+            if let Some(i2) = best_match {
+                matched1[*i1] = true;
+                matched2[i2] = true;
+                matches.push((*i1, i2));
+                
+                let decl2 = &decls2[i2];
                 
                 // Check if names differ (indicates matching different functions)
                 if decl1.name != decl2.name {
@@ -420,13 +521,13 @@ impl StructuralDiff {
                 }
                 
                 // Check for signature changes (only if similarity is not perfect)
-                if similarity < 0.95 && decl1.signature != decl2.signature {
+                if best_similarity < 0.95 && decl1.signature != decl2.signature {
                     changes.push(Change {
                         change_type: ChangeType::Modification,
                         location1: Some(self.create_location(decl1.node, source1)),
                         location2: Some(self.create_location(decl2.node, source2)),
                         description: format!("{} '{}' structure changed (similarity: {:.1}%)", 
-                            self.kind_to_string(&decl1.kind), decl1.name, similarity * 100.0),
+                            self.kind_to_string(&decl1.kind), decl1.name, best_similarity * 100.0),
                         structural_path: format!("global.{}", decl1.name),
                     });
                 }
