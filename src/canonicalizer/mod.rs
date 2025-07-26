@@ -540,6 +540,10 @@ impl Canonicalizer {
             match parent.kind() {
                 "formal_parameters" => true,
                 "catch_clause" => parent.child_by_field_name("parameter") == Some(node),
+                "arrow_function" => {
+                    // Single parameter without parentheses
+                    parent.child_by_field_name("parameter") == Some(node)
+                },
                 _ => false,
             }
         } else {
@@ -560,6 +564,14 @@ impl Canonicalizer {
                     } else {
                         false
                     }
+                }
+                "namespace_import" => {
+                    // import * as name - the identifier is the third child
+                    parent.child(2) == Some(node) && node.kind() == "identifier"
+                }
+                "import_specifier" => {
+                    // import { a as b } - the alias is a declaration
+                    parent.child_by_field_name("alias") == Some(node)
                 }
                 _ => false,
             }
@@ -639,7 +651,7 @@ mod tests {
         analyzer.analyze(tree.root_node(), source).unwrap();
         
         let mut canonicalizer = Canonicalizer::new(analyzer);
-        canonicalizer.canonicalize().unwrap();
+        canonicalizer.canonicalize(&tree, source).unwrap();
         
         let canonical_source = canonicalizer.apply_canonicalization(&tree, source).unwrap();
         assert!(canonical_source.contains("fn_1"));
