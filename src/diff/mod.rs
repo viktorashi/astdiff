@@ -569,12 +569,16 @@ impl StructuralDiff {
             // Check top candidates with full similarity
             let mut best_match = None;
             let mut best_similarity = 0.0;
+            let mut second_best_similarity = 0.0;
+            let mut all_similarities = Vec::new();
             
             for (i2, _lsh_sim) in candidates.iter().take(5) { // Only check top 5
                 let decl2 = &decls2[*i2];
                 let full_similarity = self.calculate_declaration_similarity(decl1, decl2, source1, source2);
+                all_similarities.push((decl2.name.clone(), full_similarity));
                 
-                if full_similarity >= 0.5 && full_similarity > best_similarity {
+                if full_similarity > best_similarity {
+                    second_best_similarity = best_similarity;
                     best_match = Some(*i2);
                     best_similarity = full_similarity;
                     
@@ -582,10 +586,36 @@ impl StructuralDiff {
                     if full_similarity >= 0.95 {
                         break;
                     }
+                } else if full_similarity > second_best_similarity {
+                    second_best_similarity = full_similarity;
                 }
             }
             
-            if let Some(i2) = best_match {
+            // Determine if we have a match using adaptive thresholds
+            let should_match = self.should_match(best_similarity, second_best_similarity, decl1.size);
+            
+            // Debug output if enabled
+            if std::env::var("ASTDIFF_DEBUG").is_ok() {
+                eprintln!("Matching '{}' (size: {}, line: {}):", decl1.name, decl1.size, decl1.line);
+                for (name, sim) in &all_similarities {
+                    eprintln!("  -> '{}': {:.1}%", name, sim * 100.0);
+                }
+                if should_match && best_match.is_some() {
+                    let i2 = best_match.unwrap();
+                    let decl2 = &decls2[i2];
+                    eprintln!("  Best match: '{}' at {:.1}% (gap: {:.1}%)", 
+                             decl2.name, best_similarity * 100.0, 
+                             (best_similarity - second_best_similarity) * 100.0);
+                } else {
+                    eprintln!("  No match found (best: {:.1}%, second: {:.1}%, gap: {:.1}%)", 
+                             best_similarity * 100.0, second_best_similarity * 100.0,
+                             (best_similarity - second_best_similarity) * 100.0);
+                }
+                eprintln!();
+            }
+            
+            if should_match && best_match.is_some() {
+                let i2 = best_match.unwrap();
                 matched1[*i1] = true;
                 matched2[i2] = true;
                 matches.push((*i1, i2));
@@ -679,6 +709,32 @@ impl StructuralDiff {
         }
         
         intersection.len() as f64 / union.len() as f64
+    }
+    
+    fn should_match(&self, best_similarity: f64, second_best_similarity: f64, size: usize) -> bool {
+        // Always match very high similarities
+        if best_similarity >= 0.85 {
+            return true;
+        }
+        
+        // Calculate the gap to the next best match
+        let gap = best_similarity - second_best_similarity;
+        
+        // For small functions, require higher similarity or bigger gap
+        if size < 10 {
+            // Small functions need either high similarity or large gap
+            return best_similarity >= 0.7 || (best_similarity >= 0.5 && gap >= 0.3);
+        }
+        
+        // For medium functions, be more lenient
+        if size < 50 {
+            // Medium functions: accept if reasonable similarity with good gap
+            return best_similarity >= 0.5 || (best_similarity >= 0.35 && gap >= 0.25);
+        }
+        
+        // For large functions, even more lenient
+        // Large functions: accept lower similarity if there's a clear gap
+        best_similarity >= 0.4 || (best_similarity >= 0.3 && gap >= 0.2)
     }
     
     fn is_literal(&self, node: Node) -> bool {
