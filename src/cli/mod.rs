@@ -41,6 +41,22 @@ pub struct Args {
     /// Show detailed analysis to stderr
     #[clap(long)]
     pub verbose: bool,
+    
+    /// Disable fingerprint-based matching (enabled by default for better accuracy with minified code)
+    #[clap(long = "no-fingerprints")]
+    pub no_fingerprints: bool,
+    
+    /// Generate a detailed matching report
+    #[clap(long)]
+    pub report: bool,
+    
+    /// Path to save the matching report (implies --report)
+    #[clap(long, value_name = "PATH")]
+    pub report_path: Option<PathBuf>,
+    
+    /// Compact output showing only function names and line ranges
+    #[clap(long)]
+    pub compact: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -99,6 +115,11 @@ impl Args {
                         export_mappings: self.export_mappings.clone(),
                         summary: self.summary,
                         interleaved: self.interleaved,
+                        verbose: self.verbose,
+                        fingerprints: !self.no_fingerprints,
+                        report: self.report || self.report_path.is_some(),
+                        report_path: self.report_path.clone(),
+                        compact: self.compact,
                     },
                     _ => {
                         eprintln!("Error: Two files required for diff");
@@ -163,5 +184,10 @@ pub enum Mode {
         export_mappings: Option<PathBuf>,
         summary: bool,
         interleaved: bool,
+        verbose: bool,
+        fingerprints: bool,
+        report: bool,
+        report_path: Option<PathBuf>,
+        compact: bool,
     },
 }

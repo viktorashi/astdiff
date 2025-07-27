@@ -4,10 +4,20 @@ use anyhow::Result;
 use tree_sitter::{Node, Tree};
 use serde::{Serialize, Deserialize};
 
+pub mod fingerprint;
+pub mod matching_report;
+pub mod threshold_learning;
+
+use fingerprint::*;
+use matching_report::*;
+
 /// Represents a structural diff between two JavaScript ASTs
 pub struct StructuralDiff {
     mappings1: Option<HashMap<String, String>>,
     mappings2: Option<HashMap<String, String>>,
+    use_fingerprints: bool,
+    generate_report: bool,
+    report_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +30,7 @@ struct Declaration {
     structural_hashes: HashSet<String>,
     size: usize,
     minhash_signature: Vec<u64>,
+    fingerprint: Option<FunctionFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,7 +81,23 @@ impl StructuralDiff {
         Self {
             mappings1: None,
             mappings2: None,
+            use_fingerprints: true,  // Default to true for better accuracy
+            generate_report: false,
+            report_path: None,
         }
+    }
+    
+    pub fn set_use_fingerprints(&mut self, use_fingerprints: bool) {
+        self.use_fingerprints = use_fingerprints;
+    }
+    
+    pub fn set_generate_report(&mut self, generate_report: bool) {
+        self.generate_report = generate_report;
+    }
+    
+    pub fn set_report_path(&mut self, path: std::path::PathBuf) {
+        self.report_path = Some(path.to_string_lossy().to_string());
+        self.generate_report = true;  // Automatically enable report if path is set
     }
     
     fn calculate_line_statistics(&self, result: &DiffResult, source1: &str, source2: &str) -> (usize, usize, usize) {
@@ -119,7 +146,7 @@ impl StructuralDiff {
             }
         }
         
-        // Total diff lines is all the lines that would appear in a diff output
+        // Total diff lines is all the lines that would appear in the AST diff output
         let total_diff_lines = lines_added + lines_removed;
         (lines_added, lines_removed, total_diff_lines)
     }
@@ -209,9 +236,35 @@ impl StructuralDiff {
     }
     
     fn create_declaration(&self, name: String, kind: DeclarationKind, node: Node<'static>, 
-                         line: usize, signature: String, structural_hashes: HashSet<String>) -> Declaration {
+                         line: usize, signature: String, structural_hashes: HashSet<String>, 
+                         source: &str) -> Declaration {
         let size = structural_hashes.len();
         let minhash_signature = self.compute_minhash(&structural_hashes, 128);
+        
+        // Extract fingerprint for better matching
+        let fingerprint = if self.use_fingerprints && matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
+            let extractor = FingerprintExtractor::new(source);
+            let fp = extractor.extract_function_fingerprint(node);
+            
+            // Debug fingerprints
+            if std::env::var("ASTDIFF_DEBUG").is_ok() && !fp.strings.is_empty() {
+                eprintln!("Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
+                    match kind {
+                        DeclarationKind::Function => "function",
+                        DeclarationKind::Variable => "variable",
+                        _ => "other",
+                    },
+                    name, fp.strings.len(), fp.constants.len(), fp.api_calls.len());
+                for s in &fp.strings {
+                    eprintln!("  String: '{}' ({:?})", s.value, s.context);
+                }
+            }
+            
+            Some(fp)
+        } else {
+            None
+        };
+        
         Declaration {
             name,
             kind,
@@ -221,6 +274,7 @@ impl StructuralDiff {
             structural_hashes,
             size,
             minhash_signature,
+            fingerprint,
         }
     }
     
@@ -238,6 +292,7 @@ impl StructuralDiff {
                         node.start_position().row + 1,
                         signature,
                         structural_hashes,
+                        source,
                     ));
                 }
             }
@@ -266,6 +321,7 @@ impl StructuralDiff {
                                     child.start_position().row + 1,
                                     signature,
                                     structural_hashes,
+                                    source,
                                 ));
                             }
                         }
@@ -284,6 +340,7 @@ impl StructuralDiff {
                         node.start_position().row + 1,
                         signature,
                         structural_hashes,
+                        source,
                     ));
                 }
             }
@@ -297,6 +354,7 @@ impl StructuralDiff {
                     node.start_position().row + 1,
                     signature,
                     structural_hashes,
+                    source,
                 ));
             }
             "export_statement" => {
@@ -312,6 +370,7 @@ impl StructuralDiff {
                         node.start_position().row + 1,
                         signature,
                         structural_hashes,
+                        source,
                     ));
                 }
             }
@@ -508,6 +567,25 @@ impl StructuralDiff {
     
     fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
         -> (Vec<(usize, usize)>, Vec<Change>) {
+        // Build rarity scorer if using fingerprints
+        let scorer = if self.generate_report || std::env::var("ASTDIFF_USE_FINGERPRINTS").is_ok() {
+            let mut scorer = RarityScorer::new();
+            for decl in decls1.iter().chain(decls2.iter()) {
+                if let Some(ref fp) = decl.fingerprint {
+                    scorer.add_fingerprint(fp);
+                }
+            }
+            Some(scorer)
+        } else {
+            None
+        };
+        
+        // Initialize report builder if needed
+        let mut report_builder = if self.generate_report {
+            Some(MatchingReportBuilder::new(0.5, 2)) // Default thresholds
+        } else {
+            None
+        };
         // Sort declarations by size while keeping original indices
         let mut sorted1: Vec<(usize, &Declaration)> = decls1.iter().enumerate()
             .map(|(i, d)| (i, d))
@@ -518,6 +596,14 @@ impl StructuralDiff {
             .map(|(i, d)| (i, d))
             .collect();
         sorted2.sort_by_key(|(_, d)| d.size);
+        
+        // Debug sorted arrays
+        if std::env::var("ASTDIFF_DEBUG").is_ok() {
+            eprintln!("\nSorted declarations from file 2:");
+            for (idx, (i, d)) in sorted2.iter().enumerate() {
+                eprintln!("  [{}] idx={}, '{}' size={} kind={:?}", idx, i, d.name, d.size, d.kind);
+            }
+        }
         
         let mut matches = Vec::new();
         let mut changes = Vec::new();
@@ -532,9 +618,15 @@ impl StructuralDiff {
                 continue;
             }
             
-            // Find size window in sorted2 (within 30% size difference)
-            let min_size = ((decl1.size as f64) * 0.7).max(1.0) as usize;
-            let max_size = ((decl1.size as f64) * 1.3) as usize;
+            // Find size window in sorted2 (within 50% size difference for better matching of enhanced functions)
+            let min_size = ((decl1.size as f64) * 0.5).max(1.0) as usize;
+            let max_size = ((decl1.size as f64) * 1.5) as usize;
+            
+            // Debug size window
+            if std::env::var("ASTDIFF_DEBUG").is_ok() && decl1.name == "IF" {
+                eprintln!("  Size window for IF (size {}): {} - {}", decl1.size, min_size, max_size);
+                eprintln!("  j_start: {}, sorted2.len: {}", j_start, sorted2.len());
+            }
             
             // Move j_start forward until we're in range
             while j_start < sorted2.len() && sorted2[j_start].1.size < min_size {
@@ -551,6 +643,10 @@ impl StructuralDiff {
                 }
                 
                 if matched2[*i2] || decl1.kind != decl2.kind {
+                    if std::env::var("ASTDIFF_DEBUG").is_ok() && decl1.name == "IF" && decl2.name == "IF" {
+                        eprintln!("  Skipping IF->IF: matched2[{}]={}, kinds match={}", 
+                            *i2, matched2[*i2], decl1.kind == decl2.kind);
+                    }
                     continue;
                 }
                 
@@ -571,18 +667,40 @@ impl StructuralDiff {
             // Check top candidates with full similarity
             let mut best_match = None;
             let mut best_similarity = 0.0;
+            let mut best_evidence_count = 0;
             let mut second_best_similarity = 0.0;
             let mut all_similarities = Vec::new();
+            let mut best_evidence_breakdown = None;
             
             for (i2, _lsh_sim) in candidates.iter().take(5) { // Only check top 5
                 let decl2 = &decls2[*i2];
-                let full_similarity = self.calculate_declaration_similarity(decl1, decl2, source1, source2);
+                
+                // Use fingerprint matching if available
+                let (full_similarity, evidence_count, evidence_breakdown) = 
+                    if self.use_fingerprints {
+                        if let (Some(ref fp1), Some(ref fp2), Some(ref s)) = 
+                            (&decl1.fingerprint, &decl2.fingerprint, &scorer) {
+                            let (fp_score, ev_count) = calculate_fingerprint_similarity(fp1, fp2, s);
+                            let breakdown = self.create_evidence_breakdown(decl1, decl2, fp1, fp2, s);
+                            // Combine with structural similarity
+                            let struct_sim = self.calculate_declaration_similarity(decl1, decl2, source1, source2);
+                            let combined = fp_score * 0.7 + struct_sim * 0.3;
+                            (combined, ev_count, Some(breakdown))
+                        } else {
+                            (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0, None)
+                        }
+                    } else {
+                        (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0, None)
+                    };
+                
                 all_similarities.push((decl2.name.clone(), full_similarity));
                 
                 if full_similarity > best_similarity {
                     second_best_similarity = best_similarity;
                     best_match = Some(*i2);
                     best_similarity = full_similarity;
+                    best_evidence_count = evidence_count;
+                    best_evidence_breakdown = evidence_breakdown;
                     
                     // Early termination for very good matches
                     if full_similarity >= 0.95 {
@@ -594,7 +712,12 @@ impl StructuralDiff {
             }
             
             // Determine if we have a match using adaptive thresholds
-            let should_match = self.should_match(best_similarity, second_best_similarity, decl1.size);
+            let should_match = if scorer.is_some() && best_evidence_count > 0 {
+                // Use evidence-based matching for fingerprints
+                self.should_match_with_evidence(best_similarity, best_evidence_count, decl1.size)
+            } else {
+                self.should_match(best_similarity, second_best_similarity, decl1.size)
+            };
             
             // Debug output if enabled
             if std::env::var("ASTDIFF_DEBUG").is_ok() {
@@ -623,6 +746,23 @@ impl StructuralDiff {
                 matches.push((*i1, i2));
                 
                 let decl2 = &decls2[i2];
+                
+                // Add to report if enabled
+                if let (Some(ref mut builder), Some(ref breakdown)) = 
+                    (&mut report_builder, &best_evidence_breakdown) {
+                    let detail = MatchDetail {
+                        func1: self.create_function_info(decl1, source1),
+                        func2: self.create_function_info(decl2, source2),
+                        final_score: best_similarity,
+                        confidence_level: if best_similarity >= 0.8 { "high" } 
+                                        else if best_similarity >= 0.6 { "medium" } 
+                                        else { "low" }.to_string(),
+                        evidence: breakdown.clone(),
+                        matching_rationale: format!("Score: {:.2}, Evidence: {} pieces", 
+                                                   best_similarity, best_evidence_count),
+                    };
+                    builder.add_match(detail);
+                }
                 
                 // Check if names differ (indicates matching different functions)
                 if decl1.name != decl2.name {
@@ -665,6 +805,54 @@ impl StructuralDiff {
         // Report unmatched declarations
         for (i, decl1) in decls1.iter().enumerate() {
             if !matched1[i] {
+                // Add to report if enabled
+                if let Some(ref mut builder) = report_builder {
+                    // Find best candidates that weren't matched
+                    let mut candidates_info = Vec::new();
+                    for (j, decl2) in decls2.iter().enumerate() {
+                        if !matched2[j] && decl1.kind == decl2.kind {
+                            let (score, evidence_count) = if self.use_fingerprints {
+                                if let (Some(ref fp1), Some(ref fp2), Some(ref s)) = 
+                                    (&decl1.fingerprint, &decl2.fingerprint, &scorer) {
+                                    calculate_fingerprint_similarity(fp1, fp2, s)
+                                } else {
+                                    (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0)
+                                }
+                            } else {
+                                (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0)
+                            };
+                            
+                            if score > 0.3 {
+                                // Calculate missing evidence
+                                let mut missing_evidence = Vec::new();
+                                if let (Some(ref fp1), Some(ref fp2)) = (&decl1.fingerprint, &decl2.fingerprint) {
+                                    // Find unique strings in fp1 that would help matching
+                                    for s in &fp1.strings {
+                                        if !fp2.strings.iter().any(|s2| s2.value == s.value) && s.value.len() > 5 {
+                                            missing_evidence.push(format!("string: '{}'", s.value));
+                                        }
+                                    }
+                                }
+                                
+                                candidates_info.push(CandidateInfo {
+                                    func: self.create_function_info(decl2, source2),
+                                    score,
+                                    evidence_count,
+                                    missing_evidence: missing_evidence.into_iter().take(3).collect(),
+                                });
+                            }
+                        }
+                    }
+                    
+                    candidates_info.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                    
+                    builder.add_non_match(NonMatchDetail {
+                        func: self.create_function_info(decl1, source1),
+                        from_file: 1,
+                        best_candidates: candidates_info.into_iter().take(3).collect(),
+                        why_no_match: "No sufficient evidence for matching".to_string(),
+                    });
+                }
                 changes.push(Change {
                     change_type: ChangeType::Deletion,
                     location1: Some(self.create_location(decl1.node, source1)),
@@ -677,6 +865,15 @@ impl StructuralDiff {
         
         for (j, decl2) in decls2.iter().enumerate() {
             if !matched2[j] {
+                // Add to report if enabled
+                if let Some(ref mut builder) = report_builder {
+                    builder.add_non_match(NonMatchDetail {
+                        func: self.create_function_info(decl2, source2),
+                        from_file: 2,
+                        best_candidates: Vec::new(), // Already checked above
+                        why_no_match: "New function in file 2".to_string(),
+                    });
+                }
                 changes.push(Change {
                     change_type: ChangeType::Addition,
                     location1: None,
@@ -684,6 +881,27 @@ impl StructuralDiff {
                     description: format!("Added {} '{}'", self.kind_to_string(&decl2.kind), decl2.name),
                     structural_path: format!("global.{}", decl2.name),
                 });
+            }
+        }
+        
+        // Generate and save report if enabled
+        if let Some(builder) = report_builder {
+            let report = builder.build(decls1.len(), decls2.len());
+            
+            if let Some(ref path) = self.report_path {
+                let report_md = generate_markdown_report(&report);
+                if let Err(e) = std::fs::write(path, report_md) {
+                    eprintln!("Failed to write matching report: {}", e);
+                }
+                
+                // Also save JSON for LLM analysis
+                let json_path = path.replace(".md", ".json");
+                if let Ok(json) = serde_json::to_string_pretty(&report) {
+                    let _ = std::fs::write(json_path, json);
+                }
+            } else {
+                // Print to stderr if no path specified
+                eprintln!("\n{}", generate_markdown_report(&report));
             }
         }
         
@@ -737,6 +955,162 @@ impl StructuralDiff {
         // For large functions, even more lenient
         // Large functions: accept lower similarity if there's a clear gap
         best_similarity >= 0.4 || (best_similarity >= 0.3 && gap >= 0.2)
+    }
+    
+    fn should_match_with_evidence(&self, score: f64, evidence_count: usize, _size: usize) -> bool {
+        // Evidence-based matching for fingerprints
+        // Lower thresholds when we have some evidence
+        match evidence_count {
+            0 => false,
+            1 => score >= 0.6,  // Single evidence with good score
+            2 => score >= 0.45,  // Two pieces of evidence (lowered from 0.5)
+            3..=4 => score >= 0.4,  // Several pieces
+            _ => score >= 0.35,  // Many pieces of evidence
+        }
+    }
+    
+    fn create_evidence_breakdown(&self, decl1: &Declaration, decl2: &Declaration, 
+                                fp1: &FunctionFingerprint, fp2: &FunctionFingerprint, 
+                                scorer: &RarityScorer) -> EvidenceBreakdown {
+        let mut string_matches = Vec::new();
+        let mut constant_matches = Vec::new();
+        let mut api_matches = Vec::new();
+        
+        // Match strings
+        for s1 in &fp1.strings {
+            for s2 in &fp2.strings {
+                if s1.value == s2.value {
+                    let rarity = scorer.score_string(&s1.value);
+                    let context_weight = match s1.context {
+                        StringContext::ErrorMessage => 1.2,
+                        StringContext::FilePath => 1.1,
+                        StringContext::CommandName => 1.0,
+                        StringContext::ConfigKey => 0.9,
+                        StringContext::ApiEndpoint => 1.0,
+                        StringContext::Regular => 0.7,
+                    };
+                    string_matches.push(StringMatch {
+                        value: s1.value.clone(),
+                        context: format!("{:?}", s1.context),
+                        rarity_score: rarity,
+                        contribution: rarity * context_weight,
+                    });
+                    break;
+                }
+            }
+        }
+        
+        // Match constants
+        for c1 in &fp1.constants {
+            for c2 in &fp2.constants {
+                if c1.value == c2.value {
+                    let rarity = scorer.score_constant(&c1.value);
+                    constant_matches.push(ConstantMatch {
+                        value: format!("{:?}", c1.value),
+                        type_: match &c1.value {
+                            ConstantValue::Number(_) => "number",
+                            ConstantValue::Float(_) => "float",
+                            ConstantValue::Regex(_) => "regex",
+                            ConstantValue::Duration(_) => "duration",
+                        }.to_string(),
+                        rarity_score: rarity,
+                        contribution: rarity * 0.8,
+                    });
+                    break;
+                }
+            }
+        }
+        
+        // Match API calls
+        for api1 in &fp1.api_calls {
+            for api2 in &fp2.api_calls {
+                if api1.object == api2.object && api1.method == api2.method {
+                    let rarity = scorer.score_api_call(api1);
+                    api_matches.push(ApiMatch {
+                        call: format!("{}.{}", 
+                            api1.object.as_deref().unwrap_or("global"), 
+                            api1.method),
+                        first_arg: api1.first_arg.clone(),
+                        rarity_score: rarity,
+                        contribution: rarity * 0.6,
+                    });
+                    break;
+                }
+            }
+        }
+        
+        // Calculate unique elements
+        let unique_strings1: Vec<_> = fp1.strings.iter()
+            .filter(|s| !fp2.strings.iter().any(|s2| s2.value == s.value))
+            .map(|s| (s.value.clone(), format!("{:?}", s.context)))
+            .collect();
+            
+        let unique_strings2: Vec<_> = fp2.strings.iter()
+            .filter(|s| !fp1.strings.iter().any(|s1| s1.value == s.value))
+            .map(|s| (s.value.clone(), format!("{:?}", s.context)))
+            .collect();
+        
+        let unique_to_func1 = UniqueElements {
+            strings: unique_strings1,
+            constants: Vec::new(), // TODO: implement
+            api_calls: Vec::new(), // TODO: implement
+        };
+        
+        let unique_to_func2 = UniqueElements {
+            strings: unique_strings2,
+            constants: Vec::new(), // TODO: implement
+            api_calls: Vec::new(), // TODO: implement
+        };
+        
+        // Size analysis
+        let size_ratio = decl2.size as f64 / decl1.size as f64;
+        let interpretation = if size_ratio > 1.2 {
+            "likely enhanced"
+        } else if size_ratio < 0.8 {
+            "significantly reduced"
+        } else {
+            "similar size"
+        }.to_string();
+        
+        let total_score = string_matches.iter().map(|s| s.contribution).sum::<f64>()
+            + constant_matches.iter().map(|c| c.contribution).sum::<f64>()
+            + api_matches.iter().map(|a| a.contribution).sum::<f64>();
+            
+        let evidence_count = string_matches.len() + constant_matches.len() + api_matches.len();
+        
+        EvidenceBreakdown {
+            total_score,
+            evidence_count,
+            string_matches,
+            constant_matches,
+            api_matches,
+            unique_to_func1,
+            unique_to_func2,
+            size_analysis: SizeAnalysis {
+                size1: decl1.size,
+                size2: decl2.size,
+                ratio: size_ratio,
+                size_penalty: if size_ratio < 0.7 { 0.2 } else { 0.0 },
+                interpretation,
+            },
+        }
+    }
+    
+    fn create_function_info(&self, decl: &Declaration, source: &str) -> FunctionInfo {
+        let lines: Vec<&str> = source.lines().collect();
+        let first_line = if decl.line > 0 && decl.line <= lines.len() {
+            lines[decl.line - 1].to_string()
+        } else {
+            String::new()
+        };
+        
+        FunctionInfo {
+            name: decl.name.clone(),
+            line: decl.line,
+            size: decl.size,
+            signature: decl.signature.clone(),
+            first_line,
+        }
     }
     
     fn is_literal(&self, node: Node) -> bool {
@@ -1180,7 +1554,7 @@ impl StructuralDiff {
             
             if is_simple_var_decl || first_line.trim().ends_with(',') || first_line.trim().ends_with(';') {
                 // For simple variable declarations, just print the single line
-                println!("{}{:4} {}", prefix, start_line, first_line);
+                println!("{} {}", prefix, first_line);
                 return;
             }
             
@@ -1209,9 +1583,9 @@ impl StructuralDiff {
                 }
             }
             
-            // Print the function with line numbers
+            // Print the function without line numbers
             for i in (start_line - 1)..end_line.min(lines.len()) {
-                println!("{}{:4} {}", prefix, i + 1, lines[i]);
+                println!("{} {}", prefix, lines[i]);
             }
         }
     }
@@ -1228,6 +1602,90 @@ impl StructuralDiff {
         let json = serde_json::to_string_pretty(result)?;
         println!("{}", json);
         Ok(())
+    }
+    
+    pub fn print_compact(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
+                         source1: &str, source2: &str) {
+        println!("--- {}", file1.display());
+        println!("+++ {}", file2.display());
+        println!("Structural similarity: {:.1}%", result.similarity * 100.0);
+        println!("Matched declarations: {}/{} vs {}", 
+                 result.matched_declarations, result.total_declarations1, result.total_declarations2);
+        
+        // Calculate and print line statistics
+        let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
+        println!("Diff size: {} lines (+{} -{})", total_diff, lines_added, lines_removed);
+        
+        // Group changes by type
+        let mut additions = Vec::new();
+        let mut deletions = Vec::new();
+        let mut structural_changes = Vec::new();
+        let mut renames = Vec::new();
+        
+        for change in &result.changes {
+            match change.change_type {
+                ChangeType::Addition => additions.push(change),
+                ChangeType::Deletion => deletions.push(change),
+                ChangeType::Modification => {
+                    // Separate structural changes from simple renames
+                    if change.description.contains("structure changed") {
+                        structural_changes.push(change);
+                    } else if change.description.contains("matched with") {
+                        renames.push(change);
+                    }
+                }
+                ChangeType::Reorder => {} // Ignore reorders in compact view
+            }
+        }
+        
+        // Show deletions
+        if !deletions.is_empty() {
+            println!("\n=== Removed Functions ===");
+            for change in &deletions {
+                if let Some(loc) = &change.location1 {
+                    println!("\n--- {}", change.description);
+                    println!("{}:{}", file1.display(), loc.line);
+                }
+            }
+        }
+        
+        // Show additions
+        if !additions.is_empty() {
+            println!("\n=== Added Functions ===");
+            for change in &additions {
+                if let Some(loc) = &change.location2 {
+                    println!("\n+++ {}", change.description);
+                    println!("{}:{}", file2.display(), loc.line);
+                }
+            }
+        }
+        
+        // Show structural changes
+        if !structural_changes.is_empty() {
+            println!("\n=== Modified Functions ===");
+            for change in &structural_changes {
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    println!("\n@@@ {}", change.description);
+                    println!("\n--- {}:{} (before)", file1.display(), loc1.line);
+                    println!("+++ {}:{} (after)", file2.display(), loc2.line);
+                }
+            }
+        }
+        
+        // Show renames
+        if !renames.is_empty() && std::env::var("ASTDIFF_SHOW_RENAMES").is_ok() {
+            println!("\n=== Renamed Functions ===");
+            for change in &renames {
+                if let Some(path) = change.structural_path.split("->").nth(1) {
+                    println!("    {} -> {}", 
+                        change.structural_path.split("->").next().unwrap_or("").replace("global.", ""),
+                        path);
+                }
+            }
+        }
+        
+        println!("\nChanges: {} additions, {} deletions, {} modifications (+ {} renames)", 
+                 additions.len(), deletions.len(), structural_changes.len(), renames.len());
     }
     
     /// Generate a mapping file that captures the rename relationships found during diff

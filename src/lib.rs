@@ -18,8 +18,8 @@ use pretty::PrettyPrinter;
 
 pub fn run(args: Args) -> Result<()> {
     match args.mode() {
-        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved } => {
-            run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, args.verbose)
+        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact } => {
+            run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact)
         }
         Mode::Canonicalize { input_file, preserve_comments, pretty } => {
             run_canonicalize(&input_file, preserve_comments, pretty, args.verbose)
@@ -126,7 +126,11 @@ fn run_diff(
     export_mappings: Option<std::path::PathBuf>,
     summary: bool,
     interleaved: bool,
-    _verbose: bool,
+    verbose: bool,
+    fingerprints: bool,
+    report: bool,
+    report_path: Option<std::path::PathBuf>,
+    compact: bool,
 ) -> Result<()> {
     use crate::diff::StructuralDiff;
     
@@ -138,6 +142,16 @@ fn run_diff(
     let tree2 = parser.parse(&source2)?;
     
     let mut diff = StructuralDiff::new();
+    
+    // Configure diff based on CLI flags
+    diff.set_use_fingerprints(fingerprints);
+    diff.set_generate_report(report);
+    if let Some(path) = report_path {
+        diff.set_report_path(path);
+    }
+    if verbose {
+        std::env::set_var("ASTDIFF_DEBUG", "1");
+    }
     
     // Load mappings if provided
     if let Some(map_path) = map1 {
@@ -177,7 +191,9 @@ fn run_diff(
     
     match format.as_str() {
         "unified" => {
-            if summary {
+            if compact {
+                diff.print_compact(&result, &file1, &file2, &source1, &source2)
+            } else if summary {
                 diff.print_summary(&result, &file1, &file2, &source1, &source2)
             } else if interleaved {
                 diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref(), &source1, &source2)?
