@@ -1899,14 +1899,29 @@ impl StructuralDiff {
             return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
         }
         
-        // Calculate similarity based on structural hash intersection
-        let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
-        let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
+        // Quick size check - if sizes are too different, skip expensive set operations
+        let size1 = decl1.structural_hashes.len();
+        let size2 = decl2.structural_hashes.len();
         
-        if union.is_empty() {
+        if size1 == 0 && size2 == 0 {
             // Both are empty (e.g., simple variables with no initialization)
             return if decl1.signature == decl2.signature { 1.0 } else { 0.5 };
         }
+        
+        // If one is much larger than the other, they can't be similar enough
+        let size_ratio = if size1 > size2 {
+            size2 as f64 / size1 as f64
+        } else {
+            size1 as f64 / size2 as f64
+        };
+        
+        if size_ratio < 0.3 {
+            return 0.2; // Too different in size
+        }
+        
+        // Calculate similarity based on structural hash intersection
+        let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
+        let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
         
         intersection.len() as f64 / union.len() as f64
     }

@@ -148,7 +148,8 @@ impl ParallelMatcherV2 {
                 
                 // Report progress
                 let done = progress.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
-                if done % 100_000 == 0 {
+                let report_interval = std::cmp::max(100_000, total / 10);
+                if done % report_interval < batch.len() || done == total {
                     eprintln!("  LSH progress: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
                 }
                 
@@ -168,6 +169,10 @@ impl ParallelMatcherV2 {
         calculate_similarity: &(impl Fn(&DeclarationData, &DeclarationData, &str, &str) -> f64 + Sync),
         create_evidence: &(impl Fn(&DeclarationData, &DeclarationData, &FunctionFingerprint, &FunctionFingerprint, &RarityScorer) -> EvidenceBreakdown + Sync),
     ) -> Vec<SimilarityResult> {
+        let progress = AtomicUsize::new(0);
+        let total = candidates.len();
+        eprintln!("Computing full similarity for {} candidates...", total);
+        
         candidates.par_chunks(self.batch_size / 10) // Smaller batches for expensive calculations
             .flat_map(|batch| {
                 let mut results = Vec::with_capacity(batch.len());
@@ -202,6 +207,12 @@ impl ParallelMatcherV2 {
                             evidence_breakdown,
                         });
                     }
+                }
+                
+                // Report progress
+                let done = progress.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
+                if done % 10_000 == 0 || done == total {
+                    eprintln!("  Full similarity progress: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
                 }
                 
                 results
