@@ -58,9 +58,9 @@ pub struct Args {
     #[clap(long)]
     pub compact: bool,
     
-    /// Enable parallel matching for better performance on large files
-    #[clap(long)]
-    pub parallel: bool,
+    /// Disable parallel matching (enabled by default for better performance)
+    #[clap(long = "no-parallel")]
+    pub no_parallel: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -124,7 +124,7 @@ impl Args {
                         report: self.report || self.report_path.is_some(),
                         report_path: self.report_path.clone(),
                         compact: self.compact,
-                        parallel: self.parallel,
+                        parallel: !self.no_parallel,
                     },
                     _ => {
                         eprintln!("Error: Two files required for diff");

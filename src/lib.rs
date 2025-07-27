@@ -134,13 +134,20 @@ fn run_diff(
     parallel: bool,
 ) -> Result<()> {
     use crate::diff::StructuralDiff;
+    use crate::diff::profiling::Timer;
     
-    let source1 = fs::read_to_string(&file1)?;
-    let source2 = fs::read_to_string(&file2)?;
+    let (source1, source2) = {
+        let _timer = Timer::new("read_source_files");
+        (fs::read_to_string(&file1)?, fs::read_to_string(&file2)?)
+    };
+    
+    eprintln!("Source files: {} bytes, {} bytes", source1.len(), source2.len());
     
     let mut parser = JsParser::new()?;
-    let tree1 = parser.parse(&source1)?;
-    let tree2 = parser.parse(&source2)?;
+    let (tree1, tree2) = {
+        let _timer = Timer::new("parse_javascript_files");
+        (parser.parse(&source1)?, parser.parse(&source2)?)
+    };
     
     let mut diff = StructuralDiff::new();
     
@@ -167,13 +174,17 @@ fn run_diff(
         diff.set_mappings2(mappings);
     }
     
-    let result = diff.compare(&tree1, &source1, &tree2, &source2)?;
+    let result = {
+        let _timer = Timer::new("diff_compare_total");
+        diff.compare(&tree1, &source1, &tree2, &source2)?
+    };
     
     // TODO: Apply existing mappings to enhance the output with semantic names
     // diff.apply_mappings_to_result(&mut result);
     
     // For detailed diff, we need to canonicalize both files
     let (canonical1, canonical2) = if !summary && interleaved {
+        let _timer = Timer::new("canonicalize_for_output");
         let mut analyzer1 = ScopeAnalyzer::new();
         analyzer1.analyze(tree1.root_node(), &source1)?;
         let mut canonicalizer1 = Canonicalizer::new(analyzer1);
@@ -191,21 +202,24 @@ fn run_diff(
         (None, None)
     };
     
-    match format.as_str() {
-        "unified" => {
-            if compact {
-                diff.print_compact(&result, &file1, &file2, &source1, &source2)
-            } else if summary {
-                diff.print_summary(&result, &file1, &file2, &source1, &source2)
-            } else if interleaved {
-                diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref(), &source1, &source2)?
-            } else {
-                diff.print_side_by_side_full(&result, &file1, &file2, &source1, &source2)?
+    {
+        let _timer = Timer::new("generate_output");
+        match format.as_str() {
+            "unified" => {
+                if compact {
+                    diff.print_compact(&result, &file1, &file2, &source1, &source2)
+                } else if summary {
+                    diff.print_summary(&result, &file1, &file2, &source1, &source2)
+                } else if interleaved {
+                    diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref(), &source1, &source2)?
+                } else {
+                    diff.print_side_by_side_full(&result, &file1, &file2, &source1, &source2)?
+                }
             }
+            "side-by-side" => diff.print_side_by_side(&result, &file1, &file2, &source1, &source2),
+            "json" => diff.print_json(&result)?,
+            _ => anyhow::bail!("Unknown format: {}", format),
         }
-        "side-by-side" => diff.print_side_by_side(&result, &file1, &file2, &source1, &source2),
-        "json" => diff.print_json(&result)?,
-        _ => anyhow::bail!("Unknown format: {}", format),
     }
     
     // Export rename mappings if requested
@@ -217,6 +231,9 @@ fn run_diff(
             eprintln!("Exported {} rename mappings to {}", rename_mappings.len(), export_path.display());
         }
     }
+    
+    // Report profiling data at the very end
+    crate::diff::profiling::report_profile();
     
     Ok(())
 }

@@ -116,7 +116,7 @@ impl StructuralDiff {
             use_fingerprints: true,  // Default to true for better accuracy
             generate_report: false,
             report_path: None,
-            use_parallel: false,  // Default to false for now, can be changed later
+            use_parallel: true,  // Default to true for better performance
         }
     }
     
@@ -138,6 +138,13 @@ impl StructuralDiff {
     }
     
     fn calculate_line_statistics(&self, result: &DiffResult, source1: &str, source2: &str) -> (usize, usize, usize) {
+        use profiling::Timer;
+        let _timer = Timer::new("calculate_line_statistics");
+        
+        // Pre-compute lines to avoid repeated parsing
+        let lines1: Vec<&str> = source1.lines().collect();
+        let lines2: Vec<&str> = source2.lines().collect();
+        
         let mut lines_added = 0;
         let mut lines_removed = 0;
         
@@ -148,7 +155,7 @@ impl StructuralDiff {
             match change.change_type {
                 ChangeType::Addition => {
                     if let Some(loc) = &change.location2 {
-                        let lines = self.count_declaration_lines(loc.line, source2);
+                        let lines = self.count_declaration_lines_with_lines(loc.line, &lines2);
                         if !processed_lines2.contains(&loc.line) {
                             lines_added += lines;
                             processed_lines2.insert(loc.line);
@@ -157,7 +164,7 @@ impl StructuralDiff {
                 }
                 ChangeType::Deletion => {
                     if let Some(loc) = &change.location1 {
-                        let lines = self.count_declaration_lines(loc.line, source1);
+                        let lines = self.count_declaration_lines_with_lines(loc.line, &lines1);
                         if !processed_lines1.contains(&loc.line) {
                             lines_removed += lines;
                             processed_lines1.insert(loc.line);
@@ -167,8 +174,8 @@ impl StructuralDiff {
                 ChangeType::Modification => {
                     if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
                         if !change.description.contains("moved from line") {
-                            let lines1 = self.count_declaration_lines(loc1.line, source1);
-                            let lines2 = self.count_declaration_lines(loc2.line, source2);
+                            let lines1 = self.count_declaration_lines_with_lines(loc1.line, &lines1);
+                            let lines2 = self.count_declaration_lines_with_lines(loc2.line, &lines2);
                             if !processed_lines1.contains(&loc1.line) && !processed_lines2.contains(&loc2.line) {
                                 // For modifications, count as removal + addition
                                 lines_removed += lines1;
@@ -189,7 +196,13 @@ impl StructuralDiff {
     }
     
     fn count_declaration_lines(&self, start_line: usize, source: &str) -> usize {
+        use profiling::Timer;
+        let _timer = Timer::new("count_declaration_lines");
         let lines: Vec<&str> = source.lines().collect();
+        self.count_declaration_lines_with_lines(start_line, &lines)
+    }
+
+    fn count_declaration_lines_with_lines(&self, start_line: usize, lines: &[&str]) -> usize {
         if start_line == 0 || start_line > lines.len() {
             return 1;
         }
@@ -270,9 +283,6 @@ impl StructuralDiff {
             matched_declarations as f64 / total_declarations1.max(total_declarations2) as f64
         };
         
-        // Report profiling data
-        profiling::report_profile();
-        
         Ok(DiffResult {
             identical: changes.is_empty(),
             similarity,
@@ -334,6 +344,8 @@ impl StructuralDiff {
     }
     
     fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
+        use profiling::Timer;
+        
         match node.kind() {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
