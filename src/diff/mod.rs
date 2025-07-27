@@ -137,111 +137,37 @@ impl StructuralDiff {
         self.use_parallel = use_parallel;
     }
     
-    fn calculate_line_statistics(&self, result: &DiffResult, source1: &str, source2: &str) -> (usize, usize, usize) {
+    fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
         use profiling::Timer;
         let _timer = Timer::new("calculate_line_statistics");
         
-        // Pre-compute lines to avoid repeated parsing
-        let lines1: Vec<&str> = source1.lines().collect();
-        let lines2: Vec<&str> = source2.lines().collect();
-        
-        let mut lines_added = 0;
-        let mut lines_removed = 0;
-        
-        let mut processed_lines1 = HashSet::new();
-        let mut processed_lines2 = HashSet::new();
+        // For AST diffs, count declarations rather than lines
+        // This is more meaningful for minified code where single declarations can be thousands of lines
+        let mut declarations_added = 0;
+        let mut declarations_removed = 0;
+        let mut declarations_modified = 0;
         
         for change in &result.changes {
             match change.change_type {
                 ChangeType::Addition => {
-                    if let Some(loc) = &change.location2 {
-                        let lines = self.count_declaration_lines_with_lines(loc.line, &lines2);
-                        if !processed_lines2.contains(&loc.line) {
-                            lines_added += lines;
-                            processed_lines2.insert(loc.line);
-                        }
-                    }
+                    declarations_added += 1;
                 }
                 ChangeType::Deletion => {
-                    if let Some(loc) = &change.location1 {
-                        let lines = self.count_declaration_lines_with_lines(loc.line, &lines1);
-                        if !processed_lines1.contains(&loc.line) {
-                            lines_removed += lines;
-                            processed_lines1.insert(loc.line);
-                        }
-                    }
+                    declarations_removed += 1;
                 }
                 ChangeType::Modification => {
-                    if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
-                        if !change.description.contains("moved from line") {
-                            let lines1 = self.count_declaration_lines_with_lines(loc1.line, &lines1);
-                            let lines2 = self.count_declaration_lines_with_lines(loc2.line, &lines2);
-                            if !processed_lines1.contains(&loc1.line) && !processed_lines2.contains(&loc2.line) {
-                                // For modifications, count as removal + addition
-                                lines_removed += lines1;
-                                lines_added += lines2;
-                                processed_lines1.insert(loc1.line);
-                                processed_lines2.insert(loc2.line);
-                            }
-                        }
+                    if change.description.contains("structure changed") {
+                        declarations_modified += 1;
                     }
                 }
-                ChangeType::Reorder => {} // Don't count reorders in line statistics
+                ChangeType::Reorder => {} // Don't count reorders
             }
         }
         
-        // Total diff lines is all the lines that would appear in the AST diff output
-        let total_diff_lines = lines_added + lines_removed;
-        (lines_added, lines_removed, total_diff_lines)
+        // Return declaration counts instead of line counts
+        (declarations_added, declarations_removed, declarations_added + declarations_removed + declarations_modified)
     }
     
-    fn count_declaration_lines(&self, start_line: usize, source: &str) -> usize {
-        use profiling::Timer;
-        let _timer = Timer::new("count_declaration_lines");
-        let lines: Vec<&str> = source.lines().collect();
-        self.count_declaration_lines_with_lines(start_line, &lines)
-    }
-
-    fn count_declaration_lines_with_lines(&self, start_line: usize, lines: &[&str]) -> usize {
-        if start_line == 0 || start_line > lines.len() {
-            return 1;
-        }
-        
-        let first_line = lines[start_line - 1];
-        
-        // For simple declarations, just count as 1 line
-        if first_line.trim().ends_with(',') || first_line.trim().ends_with(';') {
-            return 1;
-        }
-        
-        // For functions/classes, count until closing brace
-        let mut end_line = start_line;
-        let mut brace_count = 0;
-        let mut found_open = false;
-        
-        for (i, line) in lines.iter().enumerate().skip(start_line - 1) {
-            if line.contains('{') {
-                brace_count += line.matches('{').count();
-                found_open = true;
-            }
-            if line.contains('}') {
-                brace_count -= line.matches('}').count();
-            }
-            
-            if found_open && brace_count == 0 {
-                end_line = i + 1;
-                break;
-            }
-            
-            // For arrow functions without braces
-            if i == start_line - 1 && line.contains("=>") && !line.contains("{") {
-                end_line = i + 1;
-                break;
-            }
-        }
-        
-        end_line - start_line + 1
-    }
     
     pub fn set_mappings1(&mut self, mappings: HashMap<String, String>) {
         self.mappings1 = Some(mappings);
@@ -1272,7 +1198,7 @@ impl StructuralDiff {
         
         // Calculate and print line statistics
         let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
-        println!("Diff size: {} lines (+{} -{})", total_diff, lines_added, lines_removed);
+        println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
         
         // Group changes by type
         let mut additions = Vec::new();
@@ -1363,7 +1289,7 @@ impl StructuralDiff {
         
         // Calculate and print line statistics
         let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
-        println!("Diff size: {} lines (+{} -{})", total_diff, lines_added, lines_removed);
+        println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
         
         // Group changes by type
         let mut additions = Vec::new();
@@ -1558,7 +1484,7 @@ impl StructuralDiff {
         
         // Calculate and print line statistics
         let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
-        println!("Diff size: {} lines (+{} -{})", total_diff, lines_added, lines_removed);
+        println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
         
         // Group changes by type
         let mut additions = Vec::new();
@@ -1719,7 +1645,7 @@ impl StructuralDiff {
         
         // Calculate and print line statistics
         let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
-        println!("Diff size: {} lines (+{} -{})", total_diff, lines_added, lines_removed);
+        println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
         
         // Group changes by type
         let mut additions = Vec::new();
