@@ -8,6 +8,7 @@ pub mod fingerprint;
 pub mod matching_report;
 pub mod threshold_learning;
 pub mod parallel_matching;
+pub mod parallel_matching_v2;
 pub mod profiling;
 
 use fingerprint::*;
@@ -1836,14 +1837,21 @@ impl StructuralDiff {
     
     fn match_declarations_parallel(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
         -> (Vec<(usize, usize)>, Vec<Change>) {
-        use parallel_matching::{ParallelMatcher, MatchingContext};
+        use parallel_matching_v2::ParallelMatcherV2;
+        use profiling::Timer;
+        
+        eprintln!("Using parallel matching v2 for {} x {} declarations", decls1.len(), decls2.len());
         
         // Convert to thread-safe data structures
-        let data1: Vec<DeclarationData> = decls1.iter().map(|d| d.to_data()).collect();
+        let data1: Vec<DeclarationData> = {
+            let _timer = Timer::new("convert_to_data_structures");
+            decls1.iter().map(|d| d.to_data()).collect()
+        };
         let data2: Vec<DeclarationData> = decls2.iter().map(|d| d.to_data()).collect();
         
         // Build rarity scorer if using fingerprints
         let scorer = if self.use_fingerprints {
+            let _timer = Timer::new("build_rarity_scorer_parallel");
             let mut scorer = RarityScorer::new();
             for decl in decls1.iter().chain(decls2.iter()) {
                 if let Some(ref fp) = decl.fingerprint {
@@ -1855,51 +1863,17 @@ impl StructuralDiff {
             None
         };
         
-        let matcher = ParallelMatcher::new(self.use_fingerprints, self.generate_report);
-        let context = MatchingContext {
-            decls1: &data1,
-            decls2: &data2,
+        let matcher = ParallelMatcherV2::new(self.use_fingerprints);
+        
+        matcher.match_declarations(
+            &data1,
+            &data2,
             source1,
             source2,
-            scorer: scorer.as_ref(),
-            use_fingerprints: self.use_fingerprints,
-        };
-        
-        let (matches, mut changes) = matcher.match_declarations(
-            context,
+            scorer.as_ref(),
             |d1, d2, s1, s2| self.calculate_declaration_similarity_data(d1, d2, s1, s2),
             |d1, d2, fp1, fp2, s| self.create_evidence_breakdown_data(d1, d2, fp1, fp2, s),
-        );
-        
-        // Add deletions and additions for unmatched declarations
-        let matched1: HashSet<_> = matches.iter().map(|(i1, _)| *i1).collect();
-        let matched2: HashSet<_> = matches.iter().map(|(_, i2)| *i2).collect();
-        
-        for (i, decl) in decls1.iter().enumerate() {
-            if !matched1.contains(&i) {
-                changes.push(Change {
-                    change_type: ChangeType::Deletion,
-                    location1: Some(self.create_location(decl.node, source1)),
-                    location2: None,
-                    description: format!("Removed {} '{}'", self.kind_to_string(&decl.kind), decl.name),
-                    structural_path: format!("global.{}", decl.name),
-                });
-            }
-        }
-        
-        for (i, decl) in decls2.iter().enumerate() {
-            if !matched2.contains(&i) {
-                changes.push(Change {
-                    change_type: ChangeType::Addition,
-                    location1: None,
-                    location2: Some(self.create_location(decl.node, source2)),
-                    description: format!("Added {} '{}'", self.kind_to_string(&decl.kind), decl.name),
-                    structural_path: format!("global.{}", decl.name),
-                });
-            }
-        }
-        
-        (matches, changes)
+        )
     }
     
     fn calculate_declaration_similarity_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, _source1: &str, _source2: &str) -> f64 {
