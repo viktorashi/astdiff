@@ -267,6 +267,7 @@ impl<'a> FingerprintExtractor<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct RarityScorer {
     string_counts: HashMap<String, usize>,
     constant_counts: HashMap<ConstantValue, usize>,

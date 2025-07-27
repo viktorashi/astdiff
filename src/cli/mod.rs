@@ -57,6 +57,10 @@ pub struct Args {
     /// Compact output showing only function names and line ranges
     #[clap(long)]
     pub compact: bool,
+    
+    /// Enable parallel matching for better performance on large files
+    #[clap(long)]
+    pub parallel: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,6 +124,7 @@ impl Args {
                         report: self.report || self.report_path.is_some(),
                         report_path: self.report_path.clone(),
                         compact: self.compact,
+                        parallel: self.parallel,
                     },
                     _ => {
                         eprintln!("Error: Two files required for diff");
@@ -189,5 +194,6 @@ pub enum Mode {
         report: bool,
         report_path: Option<PathBuf>,
         compact: bool,
+        parallel: bool,
     },
 }
