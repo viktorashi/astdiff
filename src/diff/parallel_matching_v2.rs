@@ -2,8 +2,9 @@ use super::{DeclarationData, DeclarationKind, Change, ChangeType};
 use super::fingerprint::{FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer};
 use super::matching_report::EvidenceBreakdown;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::{Instant, Duration};
 
 #[derive(Debug, Clone)]
 pub struct CandidateMatch {
@@ -122,9 +123,10 @@ impl ParallelMatcherV2 {
     fn parallel_lsh_filter(&self, pairs: &[(usize, usize)], decls1: &[DeclarationData], decls2: &[DeclarationData]) -> Vec<CandidateMatch> {
         let progress = AtomicUsize::new(0);
         let total = pairs.len();
+        let last_update = Mutex::new(Instant::now());
         
         // Process in parallel batches
-        pairs.par_chunks(self.batch_size)
+        let results = pairs.par_chunks(self.batch_size)
             .flat_map(|batch| {
                 let mut local_results = Vec::with_capacity(batch.len() / 3); // Estimate 1/3 will pass
                 
@@ -146,16 +148,24 @@ impl ParallelMatcherV2 {
                     }
                 }
                 
-                // Report progress
+                // Report progress every second
                 let done = progress.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
-                let report_interval = std::cmp::max(100_000, total / 10);
-                if done % report_interval < batch.len() || done == total {
-                    eprintln!("  LSH progress: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
+                
+                if let Ok(mut last) = last_update.try_lock() {
+                    if last.elapsed() >= Duration::from_secs(1) || done == total {
+                        eprint!("\r  LSH filtering: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
+                        *last = Instant::now();
+                    }
                 }
                 
                 local_results
             })
-            .collect()
+            .collect();
+            
+        // Clear the progress line with a final update
+        eprintln!("\r  LSH filtering: {}/{} (100.0%) - Complete", total, total);
+        
+        results
     }
     
     fn parallel_full_similarity(
@@ -171,9 +181,9 @@ impl ParallelMatcherV2 {
     ) -> Vec<SimilarityResult> {
         let progress = AtomicUsize::new(0);
         let total = candidates.len();
-        eprintln!("Computing full similarity for {} candidates...", total);
+        let last_update = Mutex::new(Instant::now());
         
-        candidates.par_chunks(self.batch_size / 10) // Smaller batches for expensive calculations
+        let results = candidates.par_chunks(self.batch_size / 10) // Smaller batches for expensive calculations
             .flat_map(|batch| {
                 let mut results = Vec::with_capacity(batch.len());
                 
@@ -209,15 +219,24 @@ impl ParallelMatcherV2 {
                     }
                 }
                 
-                // Report progress
+                // Report progress every second
                 let done = progress.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
-                if done % 10_000 == 0 || done == total {
-                    eprintln!("  Full similarity progress: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
+                
+                if let Ok(mut last) = last_update.try_lock() {
+                    if last.elapsed() >= Duration::from_secs(1) || done == total {
+                        eprint!("\r  Full similarity: {}/{} ({:.1}%)", done, total, done as f64 / total as f64 * 100.0);
+                        *last = Instant::now();
+                    }
                 }
                 
                 results
             })
-            .collect()
+            .collect();
+            
+        // Clear the progress line with a final update
+        eprintln!("\r  Full similarity: {}/{} (100.0%) - Complete", total, total);
+        
+        results
     }
     
     fn resolve_best_matches(
