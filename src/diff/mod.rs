@@ -21,7 +21,6 @@ pub struct StructuralDiff {
     use_fingerprints: bool,
     generate_report: bool,
     report_path: Option<String>,
-    use_parallel: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +38,7 @@ struct Declaration {
 
 // Thread-safe declaration data for parallel processing
 #[derive(Debug, Clone)]
-pub(crate) struct DeclarationData {
+pub struct DeclarationData {
     name: String,
     kind: DeclarationKind,
     line: usize,
@@ -66,7 +65,7 @@ impl Declaration {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum DeclarationKind {
+pub enum DeclarationKind {
     Function,
     Variable,
     Class,
@@ -85,7 +84,7 @@ pub struct DiffResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Change {
+pub struct Change {
     pub change_type: ChangeType,
     pub location1: Option<Location>,
     pub location2: Option<Location>,
@@ -94,7 +93,7 @@ pub(crate) struct Change {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum ChangeType {
+pub enum ChangeType {
     Addition,
     Deletion,
     Modification,
@@ -116,7 +115,6 @@ impl StructuralDiff {
             use_fingerprints: true,  // Default to true for better accuracy
             generate_report: false,
             report_path: None,
-            use_parallel: true,  // Default to true for better performance
         }
     }
     
@@ -133,9 +131,6 @@ impl StructuralDiff {
         self.generate_report = true;  // Automatically enable report if path is set
     }
     
-    pub fn set_use_parallel(&mut self, use_parallel: bool) {
-        self.use_parallel = use_parallel;
-    }
     
     fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
         use profiling::Timer;
@@ -270,8 +265,6 @@ impl StructuralDiff {
     }
     
     fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
-        use profiling::Timer;
-        
         match node.kind() {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
@@ -558,408 +551,66 @@ impl StructuralDiff {
         matches as f64 / sig1.len() as f64
     }
     
-    fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
-        -> (Vec<(usize, usize)>, Vec<Change>) {
-        use profiling::Timer;
-        
-        if self.use_parallel && (decls1.len() > 50 || decls2.len() > 50) {
-            // Use parallel matching for large files
-            return self.match_declarations_parallel(decls1, decls2, source1, source2);
-        }
-        
-        // Build rarity scorer if using fingerprints
-        let scorer = if self.use_fingerprints {
-            let _timer = Timer::new("build_rarity_scorer");
-            let mut scorer = RarityScorer::new();
-            for decl in decls1.iter().chain(decls2.iter()) {
-                if let Some(ref fp) = decl.fingerprint {
-                    scorer.add_fingerprint(fp);
-                }
-            }
-            Some(scorer)
-        } else {
-            None
-        };
-        
-        // Initialize report builder if needed
-        let mut report_builder = if self.generate_report {
-            Some(MatchingReportBuilder::new(0.5, 2)) // Default thresholds
-        } else {
-            None
-        };
-        // Sort declarations by size while keeping original indices
-        let mut sorted1: Vec<(usize, &Declaration)> = decls1.iter().enumerate()
-            .map(|(i, d)| (i, d))
-            .collect();
-        sorted1.sort_by_key(|(_, d)| d.size);
-        
-        let mut sorted2: Vec<(usize, &Declaration)> = decls2.iter().enumerate()
-            .map(|(i, d)| (i, d))
-            .collect();
-        sorted2.sort_by_key(|(_, d)| d.size);
-        
-        // Debug sorted arrays
-        if std::env::var("ASTDIFF_DEBUG").is_ok() {
-            eprintln!("\nSorted declarations from file 2:");
-            for (idx, (i, d)) in sorted2.iter().enumerate() {
-                eprintln!("  [{}] idx={}, '{}' size={} kind={:?}", idx, i, d.name, d.size, d.kind);
-            }
-        }
-        
-        let mut matches = Vec::new();
-        let mut changes = Vec::new();
-        let mut matched1 = vec![false; decls1.len()];
-        let mut matched2 = vec![false; decls2.len()];
-        
-        let mut j_start = 0; // Track where size window starts for efficiency
-        
-        // Process declarations in size order
-        let mut total_candidates = 0;
-        let mut total_similarity_checks = 0;
-        
-        for (i1, decl1) in &sorted1 {
-            if matched1[*i1] {
-                continue;
-            }
-            
-            let _timer = Timer::new("match_single_declaration");
-            
-            // Find size window in sorted2 (within 50% size difference for better matching of enhanced functions)
-            let min_size = ((decl1.size as f64) * 0.5).max(1.0) as usize;
-            let max_size = ((decl1.size as f64) * 1.5) as usize;
-            
-            // Debug size window
-            if std::env::var("ASTDIFF_DEBUG").is_ok() && decl1.name == "IF" {
-                eprintln!("  Size window for IF (size {}): {} - {}", decl1.size, min_size, max_size);
-                eprintln!("  j_start: {}, sorted2.len: {}", j_start, sorted2.len());
-            }
-            
-            // Move j_start forward until we're in range
-            while j_start < sorted2.len() && sorted2[j_start].1.size < min_size {
-                j_start += 1;
-            }
-            
-            // Collect candidates using LSH within size window
-            let mut candidates = Vec::new();
-            {
-                let _timer = Timer::new("candidate_collection");
-                for j in j_start..sorted2.len() {
-                    let (i2, decl2) = &sorted2[j];
-                    
-                    if decl2.size > max_size {
-                        break; // Past the size window
-                    }
-                    
-                    if matched2[*i2] || decl1.kind != decl2.kind {
-                        if std::env::var("ASTDIFF_DEBUG").is_ok() && decl1.name == "IF" && decl2.name == "IF" {
-                            eprintln!("  Skipping IF->IF: matched2[{}]={}, kinds match={}", 
-                                *i2, matched2[*i2], decl1.kind == decl2.kind);
-                        }
-                        continue;
-                    }
-                    
-                    // Quick LSH filter
-                    let estimated_sim = {
-                        let _timer = Timer::new("lsh_similarity");
-                        self.estimate_minhash_similarity(
-                            &decl1.minhash_signature,
-                            &decl2.minhash_signature
-                        )
-                    };
-                    
-                    if estimated_sim >= 0.3 { // Lower threshold for LSH
-                        candidates.push((*i2, estimated_sim));
-                    }
-                }
-            }
-            total_candidates += candidates.len();
-            
-            // Sort candidates by LSH similarity
-            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            
-            // Check top candidates with full similarity
-            let mut best_match = None;
-            let mut best_similarity = 0.0;
-            let mut best_evidence_count = 0;
-            let mut second_best_similarity = 0.0;
-            let mut all_similarities = Vec::new();
-            let mut best_evidence_breakdown = None;
-            
-            for (i2, _lsh_sim) in candidates.iter().take(5) { // Only check top 5
-                let decl2 = &decls2[*i2];
-                total_similarity_checks += 1;
-                
-                // Use fingerprint matching if available
-                let (full_similarity, evidence_count, evidence_breakdown) = {
-                    let _timer = Timer::new("full_similarity_calculation");
-                    if self.use_fingerprints {
-                        if let (Some(ref fp1), Some(ref fp2), Some(ref s)) = 
-                            (&decl1.fingerprint, &decl2.fingerprint, &scorer) {
-                            let (fp_score, ev_count) = {
-                                let _timer = Timer::new("fingerprint_similarity");
-                                calculate_fingerprint_similarity(fp1, fp2, s)
-                            };
-                            let breakdown = {
-                                let _timer = Timer::new("evidence_breakdown");
-                                self.create_evidence_breakdown(decl1, decl2, fp1, fp2, s)
-                            };
-                            // Combine with structural similarity
-                            let struct_sim = {
-                                let _timer = Timer::new("structural_similarity");
-                                self.calculate_declaration_similarity(decl1, decl2, source1, source2)
-                            };
-                            let combined = fp_score * 0.7 + struct_sim * 0.3;
-                            (combined, ev_count, Some(breakdown))
-                        } else {
-                            (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0, None)
-                        }
-                    } else {
-                        (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0, None)
-                    }
-                };
-                
-                all_similarities.push((decl2.name.clone(), full_similarity));
-                
-                if full_similarity > best_similarity {
-                    second_best_similarity = best_similarity;
-                    best_match = Some(*i2);
-                    best_similarity = full_similarity;
-                    best_evidence_count = evidence_count;
-                    best_evidence_breakdown = evidence_breakdown;
-                    
-                    // Early termination for very good matches
-                    if full_similarity >= 0.95 {
-                        break;
-                    }
-                } else if full_similarity > second_best_similarity {
-                    second_best_similarity = full_similarity;
-                }
-            }
-            
-            // Determine if we have a match using adaptive thresholds
-            let should_match = if scorer.is_some() && best_evidence_count > 0 {
-                // Use evidence-based matching for fingerprints
-                self.should_match_with_evidence(best_similarity, best_evidence_count, decl1.size)
-            } else {
-                self.should_match(best_similarity, second_best_similarity, decl1.size)
-            };
-            
-            // Debug output if enabled
-            if std::env::var("ASTDIFF_DEBUG").is_ok() {
-                eprintln!("Matching '{}' (size: {}, line: {}):", decl1.name, decl1.size, decl1.line);
-                for (name, sim) in &all_similarities {
-                    eprintln!("  -> '{}': {:.1}%", name, sim * 100.0);
-                }
-                if should_match && best_match.is_some() {
-                    let i2 = best_match.unwrap();
-                    let decl2 = &decls2[i2];
-                    eprintln!("  Best match: '{}' at {:.1}% (gap: {:.1}%)", 
-                             decl2.name, best_similarity * 100.0, 
-                             (best_similarity - second_best_similarity) * 100.0);
-                } else {
-                    eprintln!("  No match found (best: {:.1}%, second: {:.1}%, gap: {:.1}%)", 
-                             best_similarity * 100.0, second_best_similarity * 100.0,
-                             (best_similarity - second_best_similarity) * 100.0);
-                }
-                eprintln!();
-            }
-            
-            if should_match && best_match.is_some() {
-                let i2 = best_match.unwrap();
-                matched1[*i1] = true;
-                matched2[i2] = true;
-                matches.push((*i1, i2));
-                
-                let decl2 = &decls2[i2];
-                
-                // Add to report if enabled
-                if let (Some(ref mut builder), Some(ref breakdown)) = 
-                    (&mut report_builder, &best_evidence_breakdown) {
-                    let detail = MatchDetail {
-                        func1: self.create_function_info(decl1, source1),
-                        func2: self.create_function_info(decl2, source2),
-                        final_score: best_similarity,
-                        confidence_level: if best_similarity >= 0.8 { "high" } 
-                                        else if best_similarity >= 0.6 { "medium" } 
-                                        else { "low" }.to_string(),
-                        evidence: breakdown.clone(),
-                        matching_rationale: format!("Score: {:.2}, Evidence: {} pieces", 
-                                                   best_similarity, best_evidence_count),
-                    };
-                    builder.add_match(detail);
-                }
-                
-                // Check if names differ (indicates matching different functions)
-                if decl1.name != decl2.name {
-                    changes.push(Change {
-                        change_type: ChangeType::Modification,
-                        location1: Some(self.create_location(decl1.node, source1)),
-                        location2: Some(self.create_location(decl2.node, source2)),
-                        description: format!("{} '{}' matched with '{}'", 
-                            self.kind_to_string(&decl1.kind), decl1.name, decl2.name),
-                        structural_path: format!("global.{}->{}", decl1.name, decl2.name),
-                    });
-                }
-                
-                // Check if it's a reorder
-                if decl1.line != decl2.line {
-                    changes.push(Change {
-                        change_type: ChangeType::Reorder,
-                        location1: Some(self.create_location(decl1.node, source1)),
-                        location2: Some(self.create_location(decl2.node, source2)),
-                        description: format!("{} '{}' moved from line {} to line {}", 
-                            self.kind_to_string(&decl1.kind), decl1.name, decl1.line, decl2.line),
-                        structural_path: format!("global.{}", decl1.name),
-                    });
-                }
-                
-                // Check for signature changes (only if similarity is not perfect)
-                if best_similarity < 0.95 && decl1.signature != decl2.signature {
-                    changes.push(Change {
-                        change_type: ChangeType::Modification,
-                        location1: Some(self.create_location(decl1.node, source1)),
-                        location2: Some(self.create_location(decl2.node, source2)),
-                        description: format!("{} '{}' structure changed (similarity: {:.1}%)", 
-                            self.kind_to_string(&decl1.kind), decl1.name, best_similarity * 100.0),
-                        structural_path: format!("global.{}", decl1.name),
-                    });
-                }
-            }
-        }
-        
-        // Report unmatched declarations
-        for (i, decl1) in decls1.iter().enumerate() {
-            if !matched1[i] {
-                // Add to report if enabled
-                if let Some(ref mut builder) = report_builder {
-                    // Find best candidates that weren't matched
-                    let mut candidates_info = Vec::new();
-                    for (j, decl2) in decls2.iter().enumerate() {
-                        if !matched2[j] && decl1.kind == decl2.kind {
-                            let (score, evidence_count) = if self.use_fingerprints {
-                                if let (Some(ref fp1), Some(ref fp2), Some(ref s)) = 
-                                    (&decl1.fingerprint, &decl2.fingerprint, &scorer) {
-                                    calculate_fingerprint_similarity(fp1, fp2, s)
-                                } else {
-                                    (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0)
-                                }
-                            } else {
-                                (self.calculate_declaration_similarity(decl1, decl2, source1, source2), 0)
-                            };
-                            
-                            if score > 0.3 {
-                                // Calculate missing evidence
-                                let mut missing_evidence = Vec::new();
-                                if let (Some(ref fp1), Some(ref fp2)) = (&decl1.fingerprint, &decl2.fingerprint) {
-                                    // Find unique strings in fp1 that would help matching
-                                    for s in &fp1.strings {
-                                        if !fp2.strings.iter().any(|s2| s2.value == s.value) && s.value.len() > 5 {
-                                            missing_evidence.push(format!("string: '{}'", s.value));
-                                        }
-                                    }
-                                }
-                                
-                                candidates_info.push(CandidateInfo {
-                                    func: self.create_function_info(decl2, source2),
-                                    score,
-                                    evidence_count,
-                                    missing_evidence: missing_evidence.into_iter().take(3).collect(),
-                                });
-                            }
-                        }
-                    }
-                    
-                    candidates_info.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-                    
-                    builder.add_non_match(NonMatchDetail {
-                        func: self.create_function_info(decl1, source1),
-                        from_file: 1,
-                        best_candidates: candidates_info.into_iter().take(3).collect(),
-                        why_no_match: "No sufficient evidence for matching".to_string(),
-                    });
-                }
-                changes.push(Change {
-                    change_type: ChangeType::Deletion,
-                    location1: Some(self.create_location(decl1.node, source1)),
-                    location2: None,
-                    description: format!("Removed {} '{}'", self.kind_to_string(&decl1.kind), decl1.name),
-                    structural_path: format!("global.{}", decl1.name),
-                });
-            }
-        }
-        
-        for (j, decl2) in decls2.iter().enumerate() {
-            if !matched2[j] {
-                // Add to report if enabled
-                if let Some(ref mut builder) = report_builder {
-                    builder.add_non_match(NonMatchDetail {
-                        func: self.create_function_info(decl2, source2),
-                        from_file: 2,
-                        best_candidates: Vec::new(), // Already checked above
-                        why_no_match: "New function in file 2".to_string(),
-                    });
-                }
-                changes.push(Change {
-                    change_type: ChangeType::Addition,
-                    location1: None,
-                    location2: Some(self.create_location(decl2.node, source2)),
-                    description: format!("Added {} '{}'", self.kind_to_string(&decl2.kind), decl2.name),
-                    structural_path: format!("global.{}", decl2.name),
-                });
-            }
-        }
-        
-        // Generate and save report if enabled
-        if let Some(builder) = report_builder {
-            let report = builder.build(decls1.len(), decls2.len());
-            
-            if let Some(ref path) = self.report_path {
-                let report_md = generate_markdown_report(&report);
-                if let Err(e) = std::fs::write(path, report_md) {
-                    eprintln!("Failed to write matching report: {}", e);
-                }
-                
-                // Also save JSON for LLM analysis
-                let json_path = path.replace(".md", ".json");
-                if let Ok(json) = serde_json::to_string_pretty(&report) {
-                    let _ = std::fs::write(json_path, json);
-                }
-            } else {
-                // Print to stderr if no path specified
-                eprintln!("\n{}", generate_markdown_report(&report));
-            }
-        }
-        
-        eprintln!("\nMatching statistics:");
-        eprintln!("  Total candidates examined: {}", total_candidates);
-        eprintln!("  Full similarity calculations: {}", total_similarity_checks);
-        eprintln!("  Average candidates per declaration: {:.1}", 
-                 total_candidates as f64 / sorted1.len() as f64);
-        
-        (matches, changes)
-    }
-    
     fn calculate_declaration_similarity(&self, decl1: &Declaration, decl2: &Declaration, _source1: &str, _source2: &str) -> f64 {
-        // Different kinds = low similarity
-        if decl1.kind != decl2.kind {
-            return 0.0;
-        }
-        
-        // For imports and exports, use signature similarity
-        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) {
+        // For imports and exports, use signature similarity regardless of kind
+        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) 
+            || matches!(decl2.kind, DeclarationKind::Import | DeclarationKind::Export) {
             return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
         }
         
-        // Calculate similarity based on structural hash intersection
+        // Calculate base similarity from structural hash intersection
         let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
         let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
         
-        if union.is_empty() {
+        let base_similarity = if union.is_empty() {
             // Both are empty (e.g., simple variables with no initialization)
-            return if decl1.signature == decl2.signature { 1.0 } else { 0.5 };
-        }
+            if decl1.signature == decl2.signature { 
+                1.0 
+            } else {
+                0.5
+            }
+        } else {
+            let jaccard = intersection.len() as f64 / union.len() as f64;
+            
+            // Boost similarity for variables with the same initialization type
+            if matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Variable) {
+                if decl1.signature.starts_with("var=") && decl2.signature.starts_with("var=") {
+                    let type1 = decl1.signature.strip_prefix("var=").unwrap_or("");
+                    let type2 = decl2.signature.strip_prefix("var=").unwrap_or("");
+                    
+                    // Debug specific cases
+                    if (decl1.name == "QhB" || decl1.name == "EhB") && (decl2.name == "QhB" || decl2.name == "EhB") {
+                        eprintln!("DEBUG MATCH: {} vs {} - sig1: {}, sig2: {}, jaccard: {:.3}", 
+                            decl1.name, decl2.name, decl1.signature, decl2.signature, jaccard);
+                    }
+                    
+                    // If they have the same type and low jaccard, boost similarity
+                    if type1 == type2 && jaccard < 0.5 && !type1.is_empty() {
+                        // Same type of initialization (e.g., both "member_expression")
+                        jaccard + 0.3  // Boost by 0.3
+                    } else {
+                        jaccard
+                    }
+                } else {
+                    jaccard
+                }
+            } else {
+                jaccard
+            }
+        };
         
-        intersection.len() as f64 / union.len() as f64
+        // Apply a penalty for different kinds, but allow matching
+        if decl1.kind != decl2.kind {
+            // Function <-> Variable is common in minified code, apply small penalty
+            if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
+                || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
+                base_similarity * 0.9  // 10% penalty
+            } else {
+                base_similarity * 0.7  // 30% penalty for other mismatches
+            }
+        } else {
+            base_similarity
+        }
     }
     
     fn should_match(&self, best_similarity: f64, second_best_similarity: f64, size: usize) -> bool {
@@ -1773,7 +1424,7 @@ impl StructuralDiff {
         }
     }
     
-    fn match_declarations_parallel(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
+    fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
         -> (Vec<(usize, usize)>, Vec<Change>) {
         use parallel_matching_v2::ParallelMatcherV2;
         use profiling::Timer;
@@ -1815,13 +1466,9 @@ impl StructuralDiff {
     }
     
     fn calculate_declaration_similarity_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, _source1: &str, _source2: &str) -> f64 {
-        // Different kinds = low similarity
-        if decl1.kind != decl2.kind {
-            return 0.0;
-        }
-        
-        // For imports and exports, use signature similarity
-        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) {
+        // For imports and exports, use signature similarity regardless of kind
+        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) 
+            || matches!(decl2.kind, DeclarationKind::Import | DeclarationKind::Export) {
             return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
         }
         
@@ -1831,7 +1478,22 @@ impl StructuralDiff {
         
         if size1 == 0 && size2 == 0 {
             // Both are empty (e.g., simple variables with no initialization)
-            return if decl1.signature == decl2.signature { 1.0 } else { 0.5 };
+            if decl1.signature == decl2.signature {
+                return 1.0;
+            } else {
+                let base_sim = 0.5;
+                
+                // Apply cross-kind penalty if needed
+                if decl1.kind != decl2.kind {
+                    if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
+                        || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
+                        return base_sim * 0.9;
+                    } else {
+                        return base_sim * 0.7;
+                    }
+                }
+                return base_sim;
+            }
         }
         
         // If one is much larger than the other, they can't be similar enough
@@ -1845,11 +1507,24 @@ impl StructuralDiff {
             return 0.2; // Too different in size
         }
         
-        // Calculate similarity based on structural hash intersection
+        // Calculate base similarity from structural hash intersection
         let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
         let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
         
-        intersection.len() as f64 / union.len() as f64
+        let base_similarity = intersection.len() as f64 / union.len() as f64;
+        
+        // Apply a penalty for different kinds, but allow matching
+        if decl1.kind != decl2.kind {
+            // Function <-> Variable is common in minified code, apply small penalty
+            if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
+                || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
+                base_similarity * 0.9  // 10% penalty
+            } else {
+                base_similarity * 0.7  // 30% penalty for other mismatches
+            }
+        } else {
+            base_similarity
+        }
     }
     
     fn create_evidence_breakdown_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, 

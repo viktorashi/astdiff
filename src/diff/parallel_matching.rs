@@ -22,17 +22,11 @@ pub struct MatchingContext<'a> {
     pub use_fingerprints: bool,
 }
 
-pub struct ParallelMatcher {
-    use_fingerprints: bool,
-    generate_report: bool,
-}
+pub struct ParallelMatcher {}
 
 impl ParallelMatcher {
-    pub fn new(use_fingerprints: bool, generate_report: bool) -> Self {
-        Self {
-            use_fingerprints,
-            generate_report,
-        }
+    pub fn new(_use_fingerprints: bool, _generate_report: bool) -> Self {
+        Self {}
     }
     
     /// Perform parallel matching of declarations

@@ -131,30 +131,43 @@ fn run_diff(
     report: bool,
     report_path: Option<std::path::PathBuf>,
     compact: bool,
-    parallel: bool,
+    _parallel: bool,
 ) -> Result<()> {
     use crate::diff::StructuralDiff;
     use crate::diff::profiling::Timer;
     
-    let (source1, source2) = {
-        let _timer = Timer::new("read_source_files");
-        (fs::read_to_string(&file1)?, fs::read_to_string(&file2)?)
-    };
+    use std::thread;
+    
+    // Load and parse both files in parallel
+    let file1_path = file1.clone();
+    let file2_path = file2.clone();
+    
+    let handle1 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
+        let _timer = Timer::new("read_and_parse_file1");
+        let source = fs::read_to_string(&file1_path)?;
+        let mut parser = JsParser::new()?;
+        let tree = parser.parse(&source)?;
+        Ok((source, tree))
+    });
+    
+    let handle2 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
+        let _timer = Timer::new("read_and_parse_file2");
+        let source = fs::read_to_string(&file2_path)?;
+        let mut parser = JsParser::new()?;
+        let tree = parser.parse(&source)?;
+        Ok((source, tree))
+    });
+    
+    let (source1, tree1) = handle1.join().expect("Thread 1 panicked")?;
+    let (source2, tree2) = handle2.join().expect("Thread 2 panicked")?;
     
     eprintln!("Source files: {} bytes, {} bytes", source1.len(), source2.len());
-    
-    let mut parser = JsParser::new()?;
-    let (tree1, tree2) = {
-        let _timer = Timer::new("parse_javascript_files");
-        (parser.parse(&source1)?, parser.parse(&source2)?)
-    };
     
     let mut diff = StructuralDiff::new();
     
     // Configure diff based on CLI flags
     diff.set_use_fingerprints(fingerprints);
     diff.set_generate_report(report);
-    diff.set_use_parallel(parallel);
     if let Some(path) = report_path {
         diff.set_report_path(path);
     }

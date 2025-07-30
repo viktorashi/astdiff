@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::diff::fingerprint::{StringFingerprint, ConstantFingerprint, ApiCallFingerprint};
 
 /// Detailed report of how matching decisions were made
 #[derive(Debug, Serialize, Deserialize)]

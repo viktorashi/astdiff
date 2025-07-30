@@ -380,11 +380,6 @@ fn create_change(
     }
 }
 
-pub(crate) fn create_location_stub(decl: &DeclarationData, source: &str) -> super::Location {
-    let lines: Vec<&str> = source.lines().collect();
-    create_location_with_lines(decl, &lines)
-}
-
 fn create_location_with_lines(decl: &DeclarationData, lines: &[&str]) -> super::Location {
     let snippet = if decl.line > 0 && decl.line <= lines.len() {
         lines[decl.line - 1].trim().to_string()

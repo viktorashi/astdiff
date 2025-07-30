@@ -42,9 +42,9 @@ pub struct Args {
     #[clap(long)]
     pub verbose: bool,
     
-    /// Disable fingerprint-based matching (enabled by default for better accuracy with minified code)
-    #[clap(long = "no-fingerprints")]
-    pub no_fingerprints: bool,
+    /// Enable fingerprint-based matching (disabled by default due to accuracy issues)
+    #[clap(long)]
+    pub fingerprints: bool,
     
     /// Generate a detailed matching report
     #[clap(long)]
@@ -120,7 +120,7 @@ impl Args {
                         summary: self.summary,
                         interleaved: self.interleaved,
                         verbose: self.verbose,
-                        fingerprints: !self.no_fingerprints,
+                        fingerprints: self.fingerprints,
                         report: self.report || self.report_path.is_some(),
                         report_path: self.report_path.clone(),
                         compact: self.compact,
