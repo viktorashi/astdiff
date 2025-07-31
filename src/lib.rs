@@ -5,11 +5,12 @@ pub mod mapping;
 pub mod cli;
 pub mod pretty;
 pub mod diff;
+pub mod dump;
 
 use anyhow::Result;
 use std::fs;
 
-pub use cli::{Args, Mode};
+pub use cli::{Args, Mode, QueryType};
 use parser::JsParser;
 use scope::ScopeAnalyzer;
 use canonicalizer::Canonicalizer;
@@ -18,8 +19,8 @@ use pretty::PrettyPrinter;
 
 pub fn run(args: Args) -> Result<()> {
     match args.mode() {
-        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, parallel } => {
-            run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, parallel)
+        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, parallel, dump } => {
+            run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, parallel, dump)
         }
         Mode::Canonicalize { input_file, preserve_comments, pretty } => {
             run_canonicalize(&input_file, preserve_comments, pretty, args.verbose)
@@ -29,6 +30,15 @@ pub fn run(args: Args) -> Result<()> {
         }
         Mode::ApplyMapping { input_file, map_file, preserve_comments, pretty } => {
             run_apply_mapping(&input_file, &map_file, preserve_comments, pretty, args.verbose)
+        }
+        Mode::Inspect { input_file, compare_file, identifier } => {
+            run_inspect(&input_file, compare_file.as_ref(), &identifier, args.verbose)
+        }
+        Mode::Query { dump_file, query_type } => {
+            run_query(&dump_file, query_type)
+        }
+        Mode::Load { dump_file, format } => {
+            run_load(&dump_file, &format)
         }
     }
 }
@@ -132,6 +142,7 @@ fn run_diff(
     report_path: Option<std::path::PathBuf>,
     compact: bool,
     _parallel: bool,
+    dump: Option<std::path::PathBuf>,
 ) -> Result<()> {
     use crate::diff::StructuralDiff;
     use crate::diff::profiling::Timer;
@@ -140,8 +151,6 @@ fn run_diff(
     
     // Load and parse both files in parallel
     let file1_path = file1.clone();
-    let file2_path = file2.clone();
-    
     let handle1 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
         let _timer = Timer::new("read_and_parse_file1");
         let source = fs::read_to_string(&file1_path)?;
@@ -150,6 +159,7 @@ fn run_diff(
         Ok((source, tree))
     });
     
+    let file2_path = file2.clone();
     let handle2 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
         let _timer = Timer::new("read_and_parse_file2");
         let source = fs::read_to_string(&file2_path)?;
@@ -189,7 +199,10 @@ fn run_diff(
     
     let result = {
         let _timer = Timer::new("diff_compare_total");
-        diff.compare(&tree1, &source1, &tree2, &source2)?
+        diff.compare(&source1, &source2, 
+                    &tree1, &tree2, 
+                    dump.as_deref(),
+                    &file1, &file2)?
     };
     
     // TODO: Apply existing mappings to enhance the output with semantic names
@@ -262,11 +275,278 @@ fn print_scope_analysis(analyzer: &ScopeAnalyzer) {
     eprintln!();
 }
 
+fn run_inspect(input_file: &std::path::PathBuf, compare_file: Option<&std::path::PathBuf>, identifier: &str, _verbose: bool) -> Result<()> {
+    use crate::diff::StructuralDiff;
+    
+    let diff = StructuralDiff::new();
+    
+    // Load and extract declarations for file1
+    let source1 = fs::read_to_string(input_file)?;
+    let mut parser = JsParser::new()?;
+    let tree1 = parser.parse(&source1)?;
+    let declarations1 = diff.extract_declarations_for_inspection(tree1.root_node(), &source1);
+    
+    // Find all declarations matching the identifier in file1
+    let matches1: Vec<_> = declarations1.iter().enumerate()
+        .filter(|(_, d)| d.name == identifier)
+        .collect();
+    
+    if matches1.is_empty() {
+        println!("No declarations found with identifier '{}' in {}", identifier, input_file.display());
+        return Ok(());
+    }
+    
+    // If comparing with another file, run the matching algorithm
+    let match_results = if let Some(file2) = compare_file {
+        let source2 = fs::read_to_string(file2)?;
+        let mut parser = JsParser::new()?;
+        let tree2 = parser.parse(&source2)?;
+        let declarations2 = diff.extract_declarations_for_inspection(tree2.root_node(), &source2);
+        
+        // Run the matching algorithm
+        let (matches, _) = diff.match_declarations(&declarations1, &declarations2, &source1, &source2);
+        
+        // Find what each declaration in file1 matched to
+        let mut match_map = std::collections::HashMap::new();
+        for (i1, i2) in matches {
+            match_map.insert(i1, i2);
+        }
+        
+        Some((declarations2, match_map, source2))
+    } else {
+        None
+    };
+    
+    println!("Found {} declaration(s) with identifier '{}' in {}:\n", matches1.len(), identifier, input_file.display());
+    
+    for (i, (idx1, decl1)) in matches1.iter().enumerate() {
+        println!("=== Declaration #{} ===", i + 1);
+        println!("File: {}", input_file.display());
+        println!("Name: {}", decl1.name);
+        println!("Kind: {:?}", decl1.kind);
+        println!("Line: {}", decl1.line);
+        println!("Size (structural hashes): {}", decl1.size);
+        println!("Signature: {}", decl1.signature);
+        
+        // Print matching information if available
+        if let Some((ref declarations2, ref match_map, ref source2)) = match_results {
+            println!("\nMatching Information:");
+            if let Some(&idx2) = match_map.get(idx1) {
+                let decl2 = &declarations2[idx2];
+                println!("  MATCHED to: {} (line {}) in {}", decl2.name, decl2.line, compare_file.unwrap().display());
+                if decl1.name != decl2.name {
+                    println!("  NOTE: Different names! {} -> {}", decl1.name, decl2.name);
+                }
+                println!("  Match similarity: calculating...");
+                
+                // Calculate similarity
+                let similarity = diff.calculate_declaration_similarity(decl1, decl2, &source1, source2);
+                println!("  Structural similarity: {:.1}%", similarity * 100.0);
+            } else {
+                println!("  NOT MATCHED - This declaration was removed or significantly changed");
+            }
+        }
+        
+        // Print structural hashes (first 10)
+        println!("\nStructural hashes (showing first 10):");
+        for (j, hash) in decl1.structural_hashes.iter().take(10).enumerate() {
+            println!("  {}: {}", j + 1, hash);
+        }
+        if decl1.structural_hashes.len() > 10 {
+            println!("  ... and {} more", decl1.structural_hashes.len() - 10);
+        }
+        
+        // Print fingerprint if available
+        if let Some(ref fp) = decl1.fingerprint {
+            println!("\nFingerprint:");
+            println!("  Strings ({}): {:?}", fp.strings.len(), 
+                fp.strings.iter().take(5).map(|s| &s.value).collect::<Vec<_>>());
+            println!("  Constants ({}): {:?}", fp.constants.len(),
+                fp.constants.iter().take(5).collect::<Vec<_>>());
+            println!("  API calls ({}): {:?}", fp.api_calls.len(),
+                fp.api_calls.iter().take(5).collect::<Vec<_>>());
+        }
+        
+        // Print AST snippet
+        println!("\nAST Node:");
+        println!("  Kind: {}", decl1.node.kind());
+        println!("  Start: {}:{}", decl1.node.start_position().row + 1, decl1.node.start_position().column);
+        println!("  End: {}:{}", decl1.node.end_position().row + 1, decl1.node.end_position().column);
+        
+        // Print source snippet
+        let start_byte = decl1.node.start_byte();
+        let end_byte = decl1.node.end_byte().min(source1.len());
+        let snippet = &source1[start_byte..end_byte];
+        let preview = if snippet.len() > 200 {
+            format!("{}...", &snippet[..200])
+        } else {
+            snippet.to_string()
+        };
+        println!("\nSource preview:");
+        println!("{}", preview);
+        
+        if i < matches1.len() - 1 {
+            println!("\n");
+        }
+    }
+    
+    // Also look for the identifier in file2 if provided
+    if let Some((ref declarations2, ref match_map, _)) = match_results {
+        let matches2: Vec<_> = declarations2.iter().enumerate()
+            .filter(|(_, d)| d.name == identifier)
+            .filter(|(idx2, _)| {
+                // Only show if it wasn't already shown as a match
+                !matches1.iter().any(|(idx1, _)| {
+                    match_map.get(idx1)
+                        .map_or(false, |&i| i == *idx2)
+                })
+            })
+            .collect();
+            
+        if !matches2.is_empty() {
+            println!("\n\nAdditional declarations with identifier '{}' in {}:", identifier, compare_file.unwrap().display());
+            for (_idx2, decl2) in matches2 {
+                println!("\n- {} (line {}) - NOT MATCHED (new declaration)", decl2.name, decl2.line);
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn run_query(dump_file: &std::path::PathBuf, query_type: QueryType) -> Result<()> {
+    use crate::dump::AstDiffDump;
+    
+    // Load the dump
+    let dump = AstDiffDump::load(dump_file)?;
+    
+    match query_type {
+        QueryType::Find { name } => {
+            if let Some(decl) = dump.find_declaration(&name) {
+                println!("Found declaration '{}' in {}:", name, 
+                         if decl.decl.line < dump.file2_data.declarations[0].decl.line { 
+                             dump.file1_data.path.display() 
+                         } else { 
+                             dump.file2_data.path.display() 
+                         });
+                println!("  Kind: {:?}", decl.decl.kind);
+                println!("  Line: {}", decl.decl.line);
+                println!("  Signature: {}", decl.decl.signature);
+                
+                if let Some(match_decision) = &decl.match_decision {
+                    println!("  Match decision: {:?}", match_decision.reason);
+                    if let Some(matched_to) = match_decision.matched_to {
+                        println!("  Matched to index: {}", matched_to);
+                    }
+                }
+            } else {
+                println!("Declaration '{}' not found in dump", name);
+            }
+        }
+        QueryType::UnmatchedFrom1 => {
+            let unmatched = dump.unmatched_from_file1();
+            println!("Unmatched declarations from {} ({} total):", 
+                     dump.file1_data.path.display(), unmatched.len());
+            for decl in unmatched {
+                println!("  - {} (line {}): {}", decl.decl.name, decl.decl.line, decl.decl.kind.to_string());
+            }
+        }
+        QueryType::UnmatchedFrom2 => {
+            let unmatched = dump.unmatched_from_file2();
+            println!("Unmatched declarations from {} ({} total):", 
+                     dump.file2_data.path.display(), unmatched.len());
+            for decl in unmatched {
+                println!("  - {} (line {}): {}", decl.decl.name, decl.decl.line, decl.decl.kind.to_string());
+            }
+        }
+        QueryType::Match { name } => {
+            // Find the declaration in file1
+            let file1_idx = dump.file1_data.declarations.iter()
+                .position(|d| d.decl.name == name);
+                
+            if let Some(idx) = file1_idx {
+                if let Some(match_pair) = dump.get_match_for(idx) {
+                    let decl2 = &dump.file2_data.declarations[match_pair.idx2];
+                    println!("Declaration '{}' from {} matches:", name, dump.file1_data.path.display());
+                    println!("  -> {} (line {}) in {}", decl2.decl.name, decl2.decl.line, dump.file2_data.path.display());
+                    println!("  Similarity: {:.1}%", match_pair.similarity * 100.0);
+                    println!("  Evidence count: {}", match_pair.evidence_count);
+                } else {
+                    println!("Declaration '{}' from {} has no match", name, dump.file1_data.path.display());
+                }
+            } else {
+                println!("Declaration '{}' not found in {}", name, dump.file1_data.path.display());
+            }
+        }
+        QueryType::Validate { file1, file2 } => {
+            match dump.validate(&file1, &file2)? {
+                true => println!("✓ Dump is valid for the provided source files"),
+                false => {
+                    println!("✗ Dump is NOT valid - source files have changed");
+                    println!("  Expected files:");
+                    println!("    - {}", dump.file1_data.path.display());
+                    println!("    - {}", dump.file2_data.path.display());
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn run_load(dump_file: &std::path::PathBuf, format: &str) -> Result<()> {
+    use crate::dump::AstDiffDump;
+    
+    // Load the dump
+    let dump = AstDiffDump::load(dump_file)?;
+    
+    match format {
+        "summary" => {
+            println!("=== AstDiff Dump Summary ===");
+            println!("Version: {}", dump.header.version);
+            println!("Created: {}", chrono::DateTime::<chrono::Utc>::from_timestamp(dump.metadata.timestamp as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "Unknown".to_string()));
+            println!("Tool version: {}", dump.metadata.tool_version);
+            println!("\nConfiguration:");
+            println!("  Use fingerprints: {}", dump.metadata.config.use_fingerprints);
+            println!("  Parallel matching: {}", dump.metadata.config.parallel_matching);
+            println!("  Threshold: {}", dump.metadata.config.threshold);
+            println!("\nFiles:");
+            println!("  File 1: {} ({} declarations)", dump.file1_data.path.display(), dump.file1_data.declarations.len());
+            println!("  File 2: {} ({} declarations)", dump.file2_data.path.display(), dump.file2_data.declarations.len());
+            println!("\nMatching results:");
+            println!("  Total matches: {}", dump.matching.matches.len());
+            println!("  Similarity: {:.1}%", dump.diff_result.similarity * 100.0);
+            println!("  Changes: {}", dump.diff_result.changes.len());
+            
+            let additions = dump.diff_result.changes.iter().filter(|c| matches!(c.change_type, crate::diff::ChangeType::Addition)).count();
+            let deletions = dump.diff_result.changes.iter().filter(|c| matches!(c.change_type, crate::diff::ChangeType::Deletion)).count();
+            let modifications = dump.diff_result.changes.iter().filter(|c| matches!(c.change_type, crate::diff::ChangeType::Modification)).count();
+            
+            println!("    - Additions: {}", additions);
+            println!("    - Deletions: {}", deletions);
+            println!("    - Modifications: {}", modifications);
+        }
+        "full" => {
+            // Print detailed information
+            println!("{:#?}", dump);
+        }
+        "json" => {
+            // Serialize to JSON
+            let json = serde_json::to_string_pretty(&dump)?;
+            println!("{}", json);
+        }
+        _ => {
+            anyhow::bail!("Unknown format: {}. Use 'summary', 'full', or 'json'", format);
+        }
+    }
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::PathBuf;
-    
     #[test]
     fn test_basic_functionality() {
         // This is a placeholder test - in a real implementation,

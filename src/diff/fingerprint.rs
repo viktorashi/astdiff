@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StringFingerprint {
     pub value: String,
     pub context: StringContext,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StringContext {
     ErrorMessage,    // Contains "error", "fail", "exception"
     ConfigKey,       // Common config patterns
@@ -17,7 +17,7 @@ pub enum StringContext {
     Regular,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstantValue {
     Number(i64),          // Integers only for now
     Float(String),        // Store as string to avoid precision issues
@@ -25,19 +25,19 @@ pub enum ConstantValue {
     Duration(u64),        // setTimeout/setInterval values
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConstantFingerprint {
     pub value: ConstantValue,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ApiCallFingerprint {
     pub object: Option<String>,   // "process.env", "fs", etc
     pub method: String,           // "existsSync", "readFileSync"
     pub first_arg: Option<String>, // If it's a literal
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionFingerprint {
     pub strings: Vec<StringFingerprint>,
     pub constants: Vec<ConstantFingerprint>,

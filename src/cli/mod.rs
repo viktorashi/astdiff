@@ -61,6 +61,11 @@ pub struct Args {
     /// Disable parallel matching (enabled by default for better performance)
     #[clap(long = "no-parallel")]
     pub no_parallel: bool,
+    
+    /// Dump extracted declarations to a file for faster processing
+    #[clap(long, value_name = "FILE")]
+    pub dump: Option<PathBuf>,
+    
 }
 
 #[derive(Subcommand, Debug)]
@@ -81,6 +86,68 @@ pub enum Command {
         /// Pretty print the output with proper indentation
         #[clap(long)]
         pretty: bool,
+    },
+    
+    /// Inspect a specific declaration in a file
+    Inspect {
+        /// Input JavaScript file
+        input_file: PathBuf,
+        
+        /// Optional second file to compare against
+        #[clap(long)]
+        compare_file: Option<PathBuf>,
+        
+        /// Name of the declaration to inspect (e.g., function name, variable name)
+        identifier: String,
+    },
+    
+    /// Query information from a comprehensive dump file
+    Query {
+        /// Path to the dump file (.astdump)
+        dump_file: PathBuf,
+        
+        #[clap(subcommand)]
+        query_type: QueryType,
+    },
+    
+    /// Load and display a comprehensive dump file
+    Load {
+        /// Path to the dump file (.astdump)
+        dump_file: PathBuf,
+        
+        /// Output format: summary (default), full, or json
+        #[clap(long, default_value = "summary")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum QueryType {
+    /// Find a declaration by name
+    Find {
+        /// Name of the declaration to find
+        name: String,
+    },
+    
+    /// Show all unmatched declarations from file1
+    UnmatchedFrom1,
+    
+    /// Show all unmatched declarations from file2
+    UnmatchedFrom2,
+    
+    /// Get match information for a declaration
+    Match {
+        /// Name of the declaration to find match for
+        name: String,
+    },
+    
+    /// Validate the dump against source files
+    Validate {
+        /// Path to the first source file
+        file1: PathBuf,
+        
+        /// Path to the second source file  
+        file2: PathBuf,
     },
 }
 
@@ -107,6 +174,19 @@ impl Args {
                     },
                 }
             },
+            Some(Command::Inspect { input_file, compare_file, identifier }) => Mode::Inspect {
+                input_file: input_file.clone(),
+                compare_file: compare_file.clone(),
+                identifier: identifier.clone(),
+            },
+            Some(Command::Query { dump_file, query_type }) => Mode::Query {
+                dump_file: dump_file.clone(),
+                query_type: query_type.clone(),
+            },
+            Some(Command::Load { dump_file, format }) => Mode::Load {
+                dump_file: dump_file.clone(),
+                format: format.clone(),
+            },
             None => {
                 // Default is diff mode
                 match (&self.file1, &self.file2) {
@@ -125,6 +205,7 @@ impl Args {
                         report_path: self.report_path.clone(),
                         compact: self.compact,
                         parallel: !self.no_parallel,
+                        dump: self.dump.clone(),
                     },
                     _ => {
                         eprintln!("Error: Two files required for diff");
@@ -146,6 +227,9 @@ impl Args {
     pub fn preserve_comments(&self) -> bool {
         match &self.command {
             Some(Command::Canon { preserve_comments, .. }) => *preserve_comments,
+            Some(Command::Inspect { .. }) => false,
+            Some(Command::Query { .. }) => false,
+            Some(Command::Load { .. }) => false,
             None => false,
         }
     }
@@ -153,6 +237,9 @@ impl Args {
     pub fn pretty(&self) -> bool {
         match &self.command {
             Some(Command::Canon { pretty, .. }) => *pretty,
+            Some(Command::Inspect { .. }) => false,
+            Some(Command::Query { .. }) => false,
+            Some(Command::Load { .. }) => false,
             None => false,
         }
     }
@@ -195,5 +282,22 @@ pub enum Mode {
         report_path: Option<PathBuf>,
         compact: bool,
         parallel: bool,
+        dump: Option<PathBuf>,
+    },
+    /// Inspect a specific declaration
+    Inspect {
+        input_file: PathBuf,
+        compare_file: Option<PathBuf>,
+        identifier: String,
+    },
+    /// Query information from a dump file
+    Query {
+        dump_file: PathBuf,
+        query_type: QueryType,
+    },
+    /// Load and display a dump file
+    Load {
+        dump_file: PathBuf,
+        format: String,
     },
 }
