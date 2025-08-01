@@ -2,8 +2,13 @@
 name = "astdiff"
 version = "0.2.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
-description = "AST-based JavaScript Diff and Code Analysis Tool"
+authors = ["astdiff contributors"]
+description = "High-performance AST-based structural diff tool for JavaScript"
+repository = "https://github.com/yourusername/astdiff"
+homepage = "https://github.com/yourusername/astdiff"
+readme = "README.md"
+keywords = ["diff", "ast", "javascript", "minified", "structural"]
+categories = ["command-line-utilities", "development-tools", "parsing"]
 license = "MIT"
 
 [[bin]]
