@@ -30,7 +30,7 @@ pub struct Declaration {
     pub node: Node<'static>,
     pub line: usize,
     pub signature: String,
-    pub structural_hashes: HashSet<String>,
+    pub structural_hashes: HashSet<u64>,
     pub size: usize,
     pub minhash_signature: Vec<u64>,
     pub fingerprint: Option<FunctionFingerprint>,
@@ -43,7 +43,7 @@ pub struct SerializableDeclaration {
     pub kind: DeclarationKind,
     pub line: usize,
     pub signature: String,
-    pub structural_hashes: HashSet<String>,
+    pub structural_hashes: HashSet<u64>,
     pub size: usize,
     pub minhash_signature: Vec<u64>,
     pub fingerprint: Option<FunctionFingerprint>,
@@ -87,7 +87,7 @@ pub struct DeclarationData {
     kind: DeclarationKind,
     line: usize,
     signature: String,
-    structural_hashes: HashSet<String>,
+    structural_hashes: HashSet<u64>,
     size: usize,
     minhash_signature: Vec<u64>,
     fingerprint: Option<FunctionFingerprint>,
@@ -335,7 +335,7 @@ impl StructuralDiff {
     }
     
     fn create_declaration(&self, name: String, kind: DeclarationKind, node: Node<'static>, 
-                         line: usize, signature: String, structural_hashes: HashSet<String>, 
+                         line: usize, signature: String, structural_hashes: HashSet<u64>, 
                          source: &str) -> Declaration {
         let size = structural_hashes.len();
         let minhash_signature = self.compute_minhash(&structural_hashes, 128);
@@ -487,13 +487,13 @@ impl StructuralDiff {
         }
     }
     
-    fn collect_structural_hashes(&self, node: Node, source: &str) -> HashSet<String> {
+    fn collect_structural_hashes(&self, node: Node, source: &str) -> HashSet<u64> {
         let mut hashes = HashSet::new();
         self.collect_structural_hashes_recursive(node, source, &mut hashes);
         hashes
     }
     
-    fn collect_structural_hashes_recursive(&self, node: Node, source: &str, hashes: &mut HashSet<String>) {
+    fn collect_structural_hashes_recursive(&self, node: Node, source: &str, hashes: &mut HashSet<u64>) {
         // Compute hash for this node
         let hash = self.compute_structural_hash(node, source);
         hashes.insert(hash);
@@ -514,7 +514,7 @@ impl StructuralDiff {
         }
     }
     
-    fn compute_structural_hash(&self, node: Node, source: &str) -> String {
+    fn compute_structural_hash(&self, node: Node, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         
         let mut hasher = DefaultHasher::new();
@@ -553,7 +553,7 @@ impl StructuralDiff {
             }
         }
         
-        format!("{:016x}", hasher.finish())
+        hasher.finish()
     }
     
     fn get_function_signature(&self, node: Node, _source: &str) -> String {
@@ -639,12 +639,12 @@ impl StructuralDiff {
         }
     }
     
-    fn compute_minhash(&self, hashes: &HashSet<String>, num_hashes: usize) -> Vec<u64> {
+    fn compute_minhash(&self, hashes: &HashSet<u64>, num_hashes: usize) -> Vec<u64> {
         let mut signature = vec![u64::MAX; num_hashes];
         
-        for hash_str in hashes {
+        for &hash in hashes {
             for i in 0..num_hashes {
-                let hash_value = self.hash_with_seed(hash_str, i);
+                let hash_value = self.hash_with_seed_u64(hash, i);
                 signature[i] = signature[i].min(hash_value);
             }
         }
@@ -652,7 +652,7 @@ impl StructuralDiff {
         signature
     }
     
-    fn hash_with_seed(&self, value: &str, seed: usize) -> u64 {
+    fn hash_with_seed_u64(&self, value: u64, seed: usize) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
