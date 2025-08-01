@@ -261,8 +261,7 @@ impl StructuralDiff {
         
         // Dump if requested
         if let Some(dump_path) = dump {
-            if dump_path.extension().map_or(true, |ext| ext == "astdump") {
-                eprintln!("Creating comprehensive dump at {}", dump_path.display());
+            eprintln!("Creating comprehensive dump at {}", dump_path.display());
                 
                 // Convert declarations to serializable format
                 let decls1: Vec<SerializableDeclaration> = declarations1_clone.iter().map(|d| d.into()).collect();
@@ -291,7 +290,6 @@ impl StructuralDiff {
                 )?;
                 
                 dump.save(dump_path)?;
-            }
         }
         
         Ok(result)
