@@ -14,9 +14,6 @@ pub mod profiling;
 use fingerprint::*;
 use matching_report::*;
 
-// Skip MinHash computation for sets smaller than signature_size * MINHASH_SKIP_THRESHOLD
-const MINHASH_SKIP_THRESHOLD: f64 = 0.5;
-
 /// Represents a structural diff between two JavaScript ASTs
 pub struct StructuralDiff {
     mappings1: Option<HashMap<String, String>>,
@@ -334,15 +331,6 @@ impl StructuralDiff {
     fn extract_declarations<'a>(&self, root: Node<'a>, source: &str) -> Vec<Declaration> {
         let mut declarations = Vec::new();
         self.extract_declarations_recursive(root, source, &mut declarations, true);
-        
-        // Report MinHash skip statistics
-        if std::env::var("ASTDIFF_PROFILE").is_ok() {
-            let skipped = declarations.iter().filter(|d| d.minhash_signature.is_empty()).count();
-            let total = declarations.len();
-            eprintln!("MinHash optimization: skipped {}/{} ({:.1}%) small declarations", 
-                     skipped, total, skipped as f64 / total as f64 * 100.0);
-        }
-        
         declarations
     }
     
@@ -350,17 +338,7 @@ impl StructuralDiff {
                          line: usize, signature: String, structural_hashes: HashSet<u64>, 
                          source: &str) -> Declaration {
         let size = structural_hashes.len();
-        
-        // Skip MinHash for small sets - direct Jaccard will be faster
-        const SIGNATURE_SIZE: usize = 128;
-        let minhash_threshold = (SIGNATURE_SIZE as f64 * MINHASH_SKIP_THRESHOLD) as usize;
-        
-        let minhash_signature = if size < minhash_threshold {
-            // Use empty signature for small sets
-            Vec::new()
-        } else {
-            self.compute_minhash(&structural_hashes, SIGNATURE_SIZE)
-        };
+        let minhash_signature = self.compute_minhash(&structural_hashes, 128);
         
         // Extract fingerprint for better matching
         let fingerprint = if self.use_fingerprints && matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
