@@ -1,183 +1,163 @@
-# ASTDiff: AST-based JavaScript Diff and Code Analysis Tool
+# astdiff
 
-A Rust-based tool that compares JavaScript files using Abstract Syntax Tree (AST) analysis, enabling meaningful comparison of code regardless of variable names, formatting, or code reordering. Perfect for analyzing minified, obfuscated, or refactored JavaScript.
+A high-performance AST-based structural diff tool for JavaScript that intelligently matches renamed functions and variables in minified or obfuscated code.
 
-## Features
+## Overview
 
-- **Structural Diff**: Compare JavaScript files based on AST structure, not text
-- **Smart Matching**: Automatically matches renamed functions and variables
-- **Flexible Output**: Side-by-side, summary, or interleaved diff formats
-- **Canonicalization**: Normalize variable names for consistent comparison
-- **Mapping Support**: Generate and apply custom variable name mappings
-- **Performance**: Optimized with size-based sorting and MinHash LSH
+`astdiff` analyzes JavaScript files at the Abstract Syntax Tree (AST) level to identify structural changes between versions, even when functions and variables have been renamed. Unlike traditional text-based diffs, it understands code structure and can match semantically equivalent code blocks.
+
+### Key Features
+
+- **Intelligent Matching**: Uses MinHash signatures and structural fingerprinting to match renamed functions
+- **Minified Code Support**: Designed to work with heavily minified/obfuscated JavaScript
+- **Fast Performance**: Parallel processing and optimized algorithms handle large files efficiently
+- **Multiple Output Formats**: Summary, detailed, compact, side-by-side, and JSON outputs
+- **Source Map Support**: Can utilize source maps to show original names when available
+- **Comprehensive Dumps**: Save and reload analysis results for faster repeated comparisons
 
 ## Installation
 
 ```bash
+cargo install --path .
+```
+
+Or build from source:
+
+```bash
 cargo build --release
+./target/release/astdiff --help
 ```
 
 ## Usage
 
-### Basic Structural Diff (Default)
+### Basic Diff
 
-Compare two JavaScript files to see what actually changed:
+Compare two JavaScript files:
 
 ```bash
-# Show side-by-side comparison of modified functions
 astdiff file1.js file2.js
-
-# Show only summary of changes
-astdiff file1.js file2.js --summary
-
-# Show interleaved line-by-line diff
-astdiff file1.js file2.js --interleaved
-
-# Export rename mappings
-astdiff file1.js file2.js --export-mappings renames.yaml
 ```
 
-### Canonicalization
+### Output Formats
 
-Convert JavaScript to canonical form with normalized variable names:
+Choose different output styles with `--format`:
 
 ```bash
-# Basic canonicalization
-astdiff canon input.js > canonical.js
+# Summary view (default)
+astdiff old.js new.js
 
-# Pretty print the output
-astdiff canon input.js --pretty
+# Detailed view with full function bodies
+astdiff old.js new.js --format detailed
 
-# Generate mapping template
-astdiff canon input.js --map > mappings.yaml
+# Compact view (just locations)
+astdiff old.js new.js --format compact
 
-# Apply custom mappings
-astdiff canon input.js --map mappings.yaml > semantic.js
+# Side-by-side comparison
+astdiff old.js new.js --format side-by-side
+
+# JSON output for programmatic use
+astdiff old.js new.js --format json
 ```
 
-## Examples
+### Advanced Options
 
-### Structural Diff Example
-
-Given two files where functions are renamed and reordered:
-
-**file1.js:**
-```javascript
-function getData() {
-    return fetch('/api/data');
-}
-
-function processData(data) {
-    return data.map(item => item.value * 2);
-}
-```
-
-**file2.js:**
-```javascript
-function b(x) {
-    return x.map(y => y.value * 2);
-}
-
-function a() {
-    return fetch('/api/v2/data'); // Changed!
-}
-```
-
-Running `astdiff file1.js file2.js` will show:
-
-- `getData` → `a` with structural modification (API endpoint changed)
-- `processData` → `b` with no structural changes (just renamed)
-- Reordering is ignored as non-meaningful
-
-### Canonicalization Example
-
-**Input (minified.js):**
-```javascript
-function a(b,c){var d=b+c;return d;}
-```
-
-**Canonical Output:**
 ```bash
-astdiff canon minified.js
-```
-```javascript
-function fn_1(param_1,param_2){var var_1=param_1+param_2;return var_1;}
+# Use source maps for better names
+astdiff old.js new.js --map1 old.js.map --map2 new.js.map
+
+# Show renamed functions (hidden by default)
+ASTDIFF_SHOW_RENAMES=1 astdiff old.js new.js
+
+# Save analysis for faster re-runs
+astdiff old.js new.js --dump analysis.astdump
+
+# Generate detailed matching report
+astdiff old.js new.js --report-path report.html
 ```
 
-**Pretty Printed:**
+### Working with Dumps
+
+Save analysis results for faster repeated comparisons:
+
 ```bash
-astdiff canon minified.js --pretty
-```
-```javascript
-function fn_1(param_1, param_2) {
-  var var_1 = param_1 + param_2;
-  return var_1;
-}
-```
+# Create a comprehensive dump
+astdiff v1.js v2.js --dump comparison.astdump
 
-## Command Line Options
+# Query the dump
+astdiff query comparison.astdump find functionName
+astdiff query comparison.astdump summary
+astdiff query comparison.astdump validate
 
-### Diff Mode (Default)
-```
-astdiff [OPTIONS] <file1> <file2>
-
-OPTIONS:
-  --map1 <FILE>           Mapping file for first file
-  --map2 <FILE>           Mapping file for second file  
-  --format <FORMAT>       Output format: unified (default), side-by-side, json
-  --export-mappings <FILE> Export rename mappings to file
-  --summary              Show only summary of changes
-  --interleaved          Show interleaved line-by-line diff
-  --verbose              Show detailed analysis
-  -h, --help             Show help
+# Load and display the dump
+astdiff load comparison.astdump
 ```
 
-### Canon Subcommand
+### Other Commands
+
+```bash
+# Canonicalize JavaScript (normalize variable names)
+astdiff canonicalize input.js
+
+# Inspect a specific declaration
+astdiff inspect file.js functionName
+astdiff inspect file.js functionName --compare-file other.js
+
+# Apply source map to canonicalized code
+astdiff apply-mapping canonical.js mapping.json
 ```
-astdiff canon [OPTIONS] <input-file>
-
-OPTIONS:
-  --map [FILE]           Generate mapping template (no file) or apply mappings (with file)
-  --preserve-comments    Keep comments in output
-  --pretty              Pretty print the output
-  -h, --help            Show help
-```
-
-## Use Cases
-
-- **Security Analysis**: Compare obfuscated malware samples to identify changes
-- **Build Verification**: Ensure minified code matches the source
-- **Code Review**: Focus on actual logic changes, not formatting
-- **Reverse Engineering**: Track changes between obfuscated versions
-- **Refactoring**: Verify that refactoring preserved functionality
 
 ## How It Works
 
-1. **Structural Hashing**: Computes hashes of AST nodes while ignoring identifiers
-2. **Declaration Extraction**: Identifies functions, variables, classes, imports, and exports
-3. **Similarity Matching**: Uses Jaccard index to find matching declarations
-4. **Optimized Search**: Size-based sorting and MinHash LSH for O(n log n) performance
+1. **Parsing**: Uses tree-sitter to parse JavaScript into ASTs
+2. **Declaration Extraction**: Identifies all functions, variables, classes, imports, and exports
+3. **Structural Hashing**: Creates hash signatures for each declaration's AST structure
+4. **MinHash Signatures**: Generates compact signatures for efficient similarity estimation
+5. **Fingerprinting**: Extracts semantic features (strings, constants, API calls) for better matching
+6. **Parallel Matching**: Uses parallel algorithms to find best matches between declarations
+7. **Change Detection**: Identifies additions, deletions, modifications, and renames
 
-## Supported JavaScript Features
+## Performance
 
-- Function declarations and expressions
-- Arrow functions  
-- Variable declarations (var, let, const)
-- Classes and methods
-- Import/export statements
-- Destructuring patterns
-- Object and array literals
-- All standard JavaScript syntax
+Optimized for large minified files:
+- Processes files with 7,500+ declarations in ~20 seconds
+- Parallel extraction and matching algorithms
+- Efficient u64-based structural hashing
+- MinHash filtering reduces comparison complexity from O(n²) to manageable levels
 
-## Contributing
+## Output Interpretation
 
-Contributions welcome for:
+The tool reports several types of changes:
 
-- TypeScript support
-- Additional output formats
-- More sophisticated matching algorithms
-- Performance improvements
+- **Added/Removed Functions**: New or deleted declarations
+- **Modified Functions**: Structurally changed but matched declarations
+- **Renamed Functions**: High-confidence matches with different names (hidden by default)
+- **Structural Similarity**: Overall percentage of matched declarations
+
+Example output:
+```
+Structural similarity: 98.5%
+Matched declarations: 7483/7490 vs 7501
+Changes: 18 additions, 7 deletions, 10 modifications (+ 7206 renames)
+```
+
+## Environment Variables
+
+- `ASTDIFF_SHOW_RENAMES`: Show renamed functions in output
+- `ASTDIFF_DEBUG`: Enable debug output for fingerprint extraction
+- `ASTDIFF_PROFILE`: Show performance profiling information
+
+## Building from Source
+
+Requirements:
+- Rust 1.70+
+- C++ compiler (for tree-sitter)
+
+```bash
+git clone https://github.com/yourusername/astdiff
+cd astdiff
+cargo build --release
+```
 
 ## License
 
-MIT License
+MIT License - see LICENSE file for details
