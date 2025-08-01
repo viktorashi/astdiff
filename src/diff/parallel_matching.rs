@@ -115,7 +115,15 @@ impl ParallelMatcher {
                         &decl2.minhash_signature
                     );
                     
-                    if lsh_sim < 0.3 {
+                    // For small declarations (empty MinHash), apply a size-based filter
+                    let should_consider = if decl1.minhash_signature.is_empty() || decl2.minhash_signature.is_empty() {
+                        let size_ratio = (decl1.size as f64 / decl2.size as f64).max(decl2.size as f64 / decl1.size as f64);
+                        size_ratio <= 3.0
+                    } else {
+                        lsh_sim >= 0.3
+                    };
+                    
+                    if !should_consider {
                         continue;
                     }
                     
@@ -233,6 +241,12 @@ impl ParallelMatcher {
 // Helper functions
 
 fn estimate_minhash_similarity(sig1: &[u64], sig2: &[u64]) -> f64 {
+    // Handle empty signatures (small sets that skipped MinHash)
+    if sig1.is_empty() || sig2.is_empty() {
+        // Return 1.0 to indicate we should compute exact similarity
+        return 1.0;
+    }
+    
     let matches = sig1.iter().zip(sig2).filter(|(a, b)| a == b).count();
     matches as f64 / sig1.len() as f64
 }
