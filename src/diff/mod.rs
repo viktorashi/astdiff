@@ -1133,6 +1133,59 @@ impl StructuralDiff {
         Some(result.join("\n"))
     }
     
+    /// Generate a unified diff using normalized text for comparison but original text
+    /// for display. This eliminates rename noise from the diff while keeping the output
+    /// readable. The normalized texts must have the same line count as the originals
+    /// (normalization only substitutes within lines, never adds/removes lines).
+    fn generate_normalized_display_diff(
+        orig1: &str, orig2: &str,
+        norm1: &str, norm2: &str,
+        context_lines: usize,
+    ) -> String {
+        use similar::{ChangeTag, TextDiff};
+
+        let diff = TextDiff::from_lines(norm1, norm2);
+        let orig_lines1: Vec<&str> = orig1.lines().collect();
+        let orig_lines2: Vec<&str> = orig2.lines().collect();
+
+        let mut output = String::new();
+        let mut has_changes = false;
+
+        for hunk in diff.unified_diff().context_radius(context_lines).iter_hunks() {
+            has_changes = true;
+            output.push_str(&format!("{}\n", hunk.header()));
+            for change in hunk.iter_changes() {
+                let sign = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
+                };
+                // Look up the original (non-normalized) line at the same index
+                let orig_line = match change.tag() {
+                    ChangeTag::Delete | ChangeTag::Equal => {
+                        change.old_index()
+                            .and_then(|i| orig_lines1.get(i))
+                            .copied()
+                            .unwrap_or("")
+                    }
+                    ChangeTag::Insert => {
+                        change.new_index()
+                            .and_then(|i| orig_lines2.get(i))
+                            .copied()
+                            .unwrap_or("")
+                    }
+                };
+                output.push_str(sign);
+                output.push_str(orig_line);
+                if !orig_line.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+        }
+
+        if has_changes { output } else { String::new() }
+    }
+
     fn print_unified_diff(&self, text1: &str, text2: &str) {
         let lines1: Vec<&str> = text1.lines().collect();
         let lines2: Vec<&str> = text2.lines().collect();
@@ -1533,19 +1586,65 @@ impl StructuralDiff {
             }
         }
         
-        // Show structural changes
+        // Show structural changes with normalized intra-declaration diffs
         if !structural_changes.is_empty() {
             println!("\n=== Modified Functions ===");
+            let mut skipped = 0usize;
             for change in &structural_changes {
                 if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
-                    println!("\n@@@ {}", change.description);
-                    // Show string diff if present
-                    if let Some(ref string_diff) = change.string_diff {
-                        print!("{}", self.format_string_diff(string_diff));
+                    let src1 = self.extract_function_at_line(source1, loc1.line);
+                    let src2 = self.extract_function_at_line(source2, loc2.line);
+
+                    if let (Some(ref s1), Some(ref s2)) = (&src1, &src2) {
+                        // Fully normalize both sides: rename map + minified ident blanking.
+                        // This is used for diffing (to eliminate rename noise) but NOT for display.
+                        let (norm_s1, norm_s2) = if !result.rename_map.is_empty() {
+                            let renamed = fingerprint::normalize_string_with_renames(s2, &result.rename_map);
+                            (
+                                fingerprint::normalize_minified_identifiers(s1),
+                                fingerprint::normalize_minified_identifiers(&renamed),
+                            )
+                        } else {
+                            (
+                                fingerprint::normalize_minified_identifiers(s1),
+                                fingerprint::normalize_minified_identifiers(s2),
+                            )
+                        };
+
+                        // Skip if identical after normalization (pure rename)
+                        if norm_s2 == norm_s1 {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        // Two-pass diff: use normalized text for comparison (finds
+                        // real changes only), but display original source text
+                        // (readable output with actual identifier names).
+                        let diff_output = Self::generate_normalized_display_diff(
+                            s1, s2, &norm_s1, &norm_s2, 3,
+                        );
+                        if diff_output.is_empty() {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        println!("\n@@@ {}", change.description);
+                        println!("--- {}:{}", file1.display(), loc1.line);
+                        println!("+++ {}:{}", file2.display(), loc2.line);
+                        print!("{}", diff_output);
+                    } else {
+                        // Couldn't extract source — fall back to description only
+                        println!("\n@@@ {}", change.description);
+                        if let Some(ref string_diff) = change.string_diff {
+                            print!("{}", self.format_string_diff(string_diff));
+                        }
+                        println!("--- {}:{} (before)", file1.display(), loc1.line);
+                        println!("+++ {}:{} (after)", file2.display(), loc2.line);
                     }
-                    println!("\n--- {}:{} (before)", file1.display(), loc1.line);
-                    println!("+++ {}:{} (after)", file2.display(), loc2.line);
                 }
+            }
+            if skipped > 0 {
+                println!("\n({} modifications skipped — only minifier renames)", skipped);
             }
         }
         
