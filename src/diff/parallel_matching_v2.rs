@@ -1,5 +1,5 @@
 use super::{DeclarationData, DeclarationKind, Change, ChangeType};
-use super::fingerprint::{FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer};
+use super::fingerprint::{FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer, compute_string_diff, StringDiff};
 use super::matching_report::EvidenceBreakdown;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +11,7 @@ pub struct CandidateMatch {
     pub i1: usize,
     pub i2: usize,
     pub lsh_similarity: f64,
+    pub name_match: bool,  // True if names match exactly
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ pub struct SimilarityResult {
     pub similarity: f64,
     pub evidence_count: usize,
     pub evidence_breakdown: Option<EvidenceBreakdown>,
+    pub name_match: bool,  // True if names match exactly
 }
 
 pub struct ParallelMatcherV2 {
@@ -94,29 +96,29 @@ impl ParallelMatcherV2 {
             .map(|(i, d)| (i, d.size))
             .collect();
         sorted2.sort_by_key(|(_, size)| *size);
-        
+
         let mut pairs = Vec::with_capacity(decls1.len() * 100); // Estimate ~100 candidates per declaration
-        
+
         for (i1, decl1) in decls1.iter().enumerate() {
             let min_size = ((decl1.size as f64) * 0.5).max(1.0) as usize;
             let max_size = ((decl1.size as f64) * 1.5) as usize;
-            
+
             // Binary search for window start
             let start_idx = sorted2.partition_point(|(_, size)| *size < min_size);
-            
+
             // Add all pairs within size window and matching kind
             for idx in start_idx..sorted2.len() {
                 let (i2, size2) = sorted2[idx];
                 if size2 > max_size {
                     break;
                 }
-                
+
                 if decl1.kind == decls2[i2].kind {
                     pairs.push((i1, i2));
                 }
             }
         }
-        
+
         pairs
     }
     
@@ -124,26 +126,40 @@ impl ParallelMatcherV2 {
         let progress = AtomicUsize::new(0);
         let total = pairs.len();
         let last_update = Mutex::new(Instant::now());
-        
+
         // Process in parallel batches
         let results = pairs.par_chunks(self.batch_size)
             .flat_map(|batch| {
                 let mut local_results = Vec::with_capacity(batch.len() / 3); // Estimate 1/3 will pass
-                
+
                 for &(i1, i2) in batch {
                     let decl1 = &decls1[i1];
                     let decl2 = &decls2[i2];
-                    
+
+                    // Always include pairs with matching names - they're almost certainly
+                    // the same function/variable and need to be compared for string diffs
+                    // even if structural similarity is low (e.g., template string content changed)
+                    if decl1.name == decl2.name {
+                        local_results.push(CandidateMatch {
+                            i1,
+                            i2,
+                            lsh_similarity: 1.0, // Treat as high similarity for matching priority
+                            name_match: true,
+                        });
+                        continue;
+                    }
+
                     let lsh_sim = estimate_minhash_similarity(
                         &decl1.minhash_signature,
                         &decl2.minhash_signature
                     );
-                    
+
                     if lsh_sim >= 0.3 {
                         local_results.push(CandidateMatch {
                             i1,
                             i2,
                             lsh_similarity: lsh_sim,
+                            name_match: false,
                         });
                     }
                 }
@@ -207,14 +223,15 @@ impl ParallelMatcherV2 {
                             (calculate_similarity(decl1, decl2, source1, source2), 0, None)
                         };
                     
-                    // Apply thresholds
-                    if should_match_with_score(similarity, evidence_count, decl1.size) {
+                    // Apply thresholds - always include name matches
+                    if candidate.name_match || should_match_with_score(similarity, evidence_count, decl1.size) {
                         results.push(SimilarityResult {
                             i1: candidate.i1,
                             i2: candidate.i2,
                             similarity,
                             evidence_count,
                             evidence_breakdown,
+                            name_match: candidate.name_match,
                         });
                     }
                 }
@@ -267,7 +284,7 @@ impl ParallelMatcherV2 {
                 matched1[result.i1] = true;
                 matched2[result.i2] = true;
                 matches.push((result.i1, result.i2));
-                
+
                 let decl1 = &decls1[result.i1];
                 let decl2 = &decls2[result.i2];
                 
@@ -277,31 +294,56 @@ impl ParallelMatcherV2 {
                         ChangeType::Modification,
                         Some(create_location_with_lines(decl1, &lines1)),
                         Some(create_location_with_lines(decl2, &lines2)),
-                        format!("{} '{}' matched with '{}'", 
+                        format!("{} '{}' matched with '{}'",
                             kind_to_string(&decl1.kind), decl1.name, decl2.name),
                         format!("global.{}->{}", decl1.name, decl2.name),
+                        None,
                     ));
                 }
-                
+
                 if decl1.line != decl2.line {
                     changes.push(create_change(
                         ChangeType::Reorder,
                         Some(create_location_with_lines(decl1, &lines1)),
                         Some(create_location_with_lines(decl2, &lines2)),
-                        format!("{} '{}' moved from line {} to line {}", 
+                        format!("{} '{}' moved from line {} to line {}",
                             kind_to_string(&decl1.kind), decl1.name, decl1.line, decl2.line),
                         format!("global.{}", decl1.name),
+                        None,
                     ));
                 }
-                
-                if result.similarity < 0.95 && decl1.signature != decl2.signature {
+
+                // Check for string content changes (even if structure is similar)
+                let string_diff = match (&decl1.fingerprint, &decl2.fingerprint) {
+                    (Some(fp1), Some(fp2)) => {
+                        let diff = compute_string_diff(fp1, fp2);
+                        if diff.is_empty() { None } else { Some(diff) }
+                    }
+                    _ => None,
+                };
+
+                // Report structural changes OR important string changes
+                let has_structural_change = result.similarity < 0.95 && decl1.signature != decl2.signature;
+                let has_important_string_change = string_diff.as_ref()
+                    .map(|d| d.has_important_changes())
+                    .unwrap_or(false);
+
+                if has_structural_change || has_important_string_change {
+                    let description = if has_structural_change {
+                        format!("{} '{}' structure changed (similarity: {:.1}%)",
+                            kind_to_string(&decl1.kind), decl1.name, result.similarity * 100.0)
+                    } else {
+                        format!("{} '{}' has text constant changes",
+                            kind_to_string(&decl1.kind), decl1.name)
+                    };
+
                     changes.push(create_change(
                         ChangeType::Modification,
                         Some(create_location_with_lines(decl1, &lines1)),
                         Some(create_location_with_lines(decl2, &lines2)),
-                        format!("{} '{}' structure changed (similarity: {:.1}%)", 
-                            kind_to_string(&decl1.kind), decl1.name, result.similarity * 100.0),
+                        description,
                         format!("global.{}", decl1.name),
+                        string_diff,
                     ));
                 }
             }
@@ -316,10 +358,11 @@ impl ParallelMatcherV2 {
                     None,
                     format!("Removed {} '{}'", kind_to_string(&decl.kind), decl.name),
                     format!("global.{}", decl.name),
+                    None,
                 ));
             }
         }
-        
+
         for (i, decl) in decls2.iter().enumerate() {
             if !matched2[i] {
                 changes.push(create_change(
@@ -328,6 +371,7 @@ impl ParallelMatcherV2 {
                     Some(create_location_with_lines(decl, &lines2)),
                     format!("Added {} '{}'", kind_to_string(&decl.kind), decl.name),
                     format!("global.{}", decl.name),
+                    None,
                 ));
             }
         }
@@ -370,6 +414,7 @@ fn create_change(
     location2: Option<super::Location>,
     description: String,
     structural_path: String,
+    string_diff: Option<StringDiff>,
 ) -> super::Change {
     super::Change {
         change_type,
@@ -377,6 +422,7 @@ fn create_change(
         location2,
         description,
         structural_path,
+        string_diff,
     }
 }
 
@@ -391,6 +437,7 @@ fn create_location_with_lines(decl: &DeclarationData, lines: &[&str]) -> super::
         line: decl.line,
         column: 0,
         code_snippet: snippet,
+        end_line: Some(decl.end_line),
     }
 }
 

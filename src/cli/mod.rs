@@ -58,6 +58,10 @@ pub struct Args {
     #[clap(long)]
     pub compact: bool,
     
+    /// Lite output showing only definition names and line numbers (no code)
+    #[clap(long)]
+    pub lite: bool,
+    
     /// Disable parallel matching (enabled by default for better performance)
     #[clap(long = "no-parallel")]
     pub no_parallel: bool,
@@ -204,6 +208,7 @@ impl Args {
                         report: self.report || self.report_path.is_some(),
                         report_path: self.report_path.clone(),
                         compact: self.compact,
+                        lite: self.lite,
                         parallel: !self.no_parallel,
                         dump: self.dump.clone(),
                     },
@@ -281,6 +286,7 @@ pub enum Mode {
         report: bool,
         report_path: Option<PathBuf>,
         compact: bool,
+        lite: bool,
         parallel: bool,
         dump: Option<PathBuf>,
     },

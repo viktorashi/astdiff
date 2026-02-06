@@ -45,6 +45,144 @@ pub struct FunctionFingerprint {
     pub size: usize,
 }
 
+/// Represents a change to a string constant between two versions
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StringChange {
+    Added(StringFingerprint),
+    Removed(StringFingerprint),
+    Modified {
+        old: StringFingerprint,
+        new: StringFingerprint,
+        similarity: f64,
+    },
+}
+
+/// Categorizes string importance based on length
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StringImportance {
+    SystemPrompt,  // > 500 chars - very likely a prompt
+    LongText,      // 100-500 chars - important
+    Medium,        // 20-100 chars
+    Short,         // < 20 chars
+}
+
+impl StringFingerprint {
+    pub fn importance(&self) -> StringImportance {
+        match self.value.len() {
+            0..=19 => StringImportance::Short,
+            20..=99 => StringImportance::Medium,
+            100..=499 => StringImportance::LongText,
+            _ => StringImportance::SystemPrompt,
+        }
+    }
+}
+
+/// Summary of string changes between two matched functions
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StringDiff {
+    pub changes: Vec<StringChange>,
+    pub important_changes: Vec<StringChange>,  // Strings > 100 chars
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub modified_count: usize,
+}
+
+impl StringDiff {
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    pub fn has_important_changes(&self) -> bool {
+        !self.important_changes.is_empty()
+    }
+}
+
+/// Compute the diff between strings in two function fingerprints
+pub fn compute_string_diff(fp1: &FunctionFingerprint, fp2: &FunctionFingerprint) -> StringDiff {
+    use strsim::normalized_levenshtein;
+
+    let mut changes = Vec::new();
+    let mut used_from_fp2: HashSet<usize> = HashSet::new();
+
+    // Find exact matches first (these are not changes)
+    let exact_matches: HashSet<String> = fp1.strings.iter()
+        .filter(|s1| fp2.strings.iter().any(|s2| s1.value == s2.value))
+        .map(|s| s.value.clone())
+        .collect();
+
+    // For each string in fp1 not in exact matches, look for fuzzy match or mark as removed
+    for s1 in &fp1.strings {
+        if exact_matches.contains(&s1.value) {
+            continue;
+        }
+
+        // Try to find a fuzzy match in fp2
+        // Only consider strings of similar length (within 2x) for fuzzy matching
+        let best_match = fp2.strings.iter()
+            .enumerate()
+            .filter(|(i, _)| !used_from_fp2.contains(i))
+            .filter(|(_, s2)| !exact_matches.contains(&s2.value))
+            .filter(|(_, s2)| {
+                let len_ratio = s1.value.len().max(s2.value.len()) as f64
+                    / s1.value.len().min(s2.value.len()).max(1) as f64;
+                len_ratio < 2.0  // Within 2x length
+            })
+            .map(|(i, s2)| {
+                let similarity = normalized_levenshtein(&s1.value, &s2.value);
+                (i, s2, similarity)
+            })
+            .filter(|(_, _, sim)| *sim > 0.6)  // Minimum 60% similarity
+            .max_by(|(_, _, sim1), (_, _, sim2)| sim1.partial_cmp(sim2).unwrap());
+
+        if let Some((idx, s2, similarity)) = best_match {
+            used_from_fp2.insert(idx);
+            changes.push(StringChange::Modified {
+                old: s1.clone(),
+                new: s2.clone(),
+                similarity,
+            });
+        } else {
+            changes.push(StringChange::Removed(s1.clone()));
+        }
+    }
+
+    // Remaining strings in fp2 are additions
+    for (i, s2) in fp2.strings.iter().enumerate() {
+        if !exact_matches.contains(&s2.value) && !used_from_fp2.contains(&i) {
+            changes.push(StringChange::Added(s2.clone()));
+        }
+    }
+
+    // Separate important changes (strings > 100 chars)
+    let important_changes: Vec<StringChange> = changes.iter()
+        .filter(|c| match c {
+            StringChange::Added(s) => s.value.len() >= 100,
+            StringChange::Removed(s) => s.value.len() >= 100,
+            StringChange::Modified { old, new, .. } =>
+                old.value.len() >= 100 || new.value.len() >= 100,
+        })
+        .cloned()
+        .collect();
+
+    // Count by type
+    let (added_count, removed_count, modified_count) = changes.iter()
+        .fold((0, 0, 0), |(a, r, m), c| {
+            match c {
+                StringChange::Added(_) => (a + 1, r, m),
+                StringChange::Removed(_) => (a, r + 1, m),
+                StringChange::Modified { .. } => (a, r, m + 1),
+            }
+        });
+
+    StringDiff {
+        changes,
+        important_changes,
+        added_count,
+        removed_count,
+        modified_count,
+    }
+}
+
 pub struct FingerprintExtractor<'a> {
     source: &'a str,
 }

@@ -287,33 +287,36 @@ fn generate_changes_for_match(
             change_type: ChangeType::Modification,
             location1: Some(create_location_stub(decl1, source1)),
             location2: Some(create_location_stub(decl2, source2)),
-            description: format!("{} '{}' matched with '{}'", 
+            description: format!("{} '{}' matched with '{}'",
                 kind_to_string(&decl1.kind), decl1.name, decl2.name),
             structural_path: format!("global.{}->{}", decl1.name, decl2.name),
+            string_diff: None,
         });
     }
-    
+
     // Check if it's a reorder
     if decl1.line != decl2.line {
         changes.push(Change {
             change_type: ChangeType::Reorder,
             location1: Some(create_location_stub(decl1, source1)),
             location2: Some(create_location_stub(decl2, source2)),
-            description: format!("{} '{}' moved from line {} to line {}", 
+            description: format!("{} '{}' moved from line {} to line {}",
                 kind_to_string(&decl1.kind), decl1.name, decl1.line, decl2.line),
             structural_path: format!("global.{}", decl1.name),
+            string_diff: None,
         });
     }
-    
+
     // Check for signature changes
     if similarity < 0.95 && decl1.signature != decl2.signature {
         changes.push(Change {
             change_type: ChangeType::Modification,
             location1: Some(create_location_stub(decl1, source1)),
             location2: Some(create_location_stub(decl2, source2)),
-            description: format!("{} '{}' structure changed (similarity: {:.1}%)", 
+            description: format!("{} '{}' structure changed (similarity: {:.1}%)",
                 kind_to_string(&decl1.kind), decl1.name, similarity * 100.0),
             structural_path: format!("global.{}", decl1.name),
+            string_diff: None,
         });
     }
     
@@ -333,6 +336,7 @@ pub(crate) fn create_location_stub(decl: &DeclarationData, source: &str) -> supe
         line: decl.line,
         column: 0,
         code_snippet: snippet,
+        end_line: Some(decl.end_line),
     }
 }
 

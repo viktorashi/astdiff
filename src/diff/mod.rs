@@ -86,6 +86,7 @@ pub struct DeclarationData {
     name: String,
     kind: DeclarationKind,
     line: usize,
+    end_line: usize,
     signature: String,
     structural_hashes: HashSet<u64>,
     size: usize,
@@ -99,6 +100,7 @@ impl Declaration {
             name: self.name.clone(),
             kind: self.kind.clone(),
             line: self.line,
+            end_line: self.node.end_position().row + 1,
             signature: self.signature.clone(),
             structural_hashes: self.structural_hashes.clone(),
             size: self.size,
@@ -146,6 +148,9 @@ pub struct Change {
     pub location2: Option<Location>,
     pub description: String,
     pub structural_path: String,
+    /// String constant changes for modified functions (text diffs like system prompts)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub string_diff: Option<StringDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +166,7 @@ pub struct Location {
     pub line: usize,
     pub column: usize,
     pub code_snippet: String,
+    pub end_line: Option<usize>,  // Optional end line for line ranges
 }
 
 impl StructuralDiff {
@@ -191,8 +197,72 @@ impl StructuralDiff {
         self.report_path = Some(path.to_string_lossy().to_string());
         self.generate_report = true;  // Automatically enable report if path is set
     }
-    
-    
+
+    /// Format string diff for display, highlighting important changes
+    fn format_string_diff(&self, diff: &StringDiff) -> String {
+        let mut output = String::new();
+
+        // Show important changes first (strings > 100 chars, like system prompts)
+        if !diff.important_changes.is_empty() {
+            output.push_str("    [IMPORTANT] Long text changes:\n");
+            for change in &diff.important_changes {
+                match change {
+                    StringChange::Added(s) => {
+                        output.push_str(&format!("      + ADDED ({} chars): \"{}\"\n",
+                            s.value.len(),
+                            Self::truncate_with_ellipsis(&s.value, 120)));
+                    }
+                    StringChange::Removed(s) => {
+                        output.push_str(&format!("      - REMOVED ({} chars): \"{}\"\n",
+                            s.value.len(),
+                            Self::truncate_with_ellipsis(&s.value, 120)));
+                    }
+                    StringChange::Modified { old, new, similarity } => {
+                        output.push_str(&format!("      ~ MODIFIED ({:.0}% similar, {} -> {} chars):\n",
+                            similarity * 100.0, old.value.len(), new.value.len()));
+                        output.push_str(&format!("        - \"{}\"\n",
+                            Self::truncate_with_ellipsis(&old.value, 100)));
+                        output.push_str(&format!("        + \"{}\"\n",
+                            Self::truncate_with_ellipsis(&new.value, 100)));
+                    }
+                }
+            }
+        }
+
+        // Summary of other (shorter) string changes
+        let other_added = diff.added_count - diff.important_changes.iter()
+            .filter(|c| matches!(c, StringChange::Added(_))).count();
+        let other_removed = diff.removed_count - diff.important_changes.iter()
+            .filter(|c| matches!(c, StringChange::Removed(_))).count();
+        let other_modified = diff.modified_count - diff.important_changes.iter()
+            .filter(|c| matches!(c, StringChange::Modified { .. })).count();
+
+        if other_added > 0 || other_removed > 0 || other_modified > 0 {
+            output.push_str(&format!("    Other string changes: +{} added, -{} removed, ~{} modified\n",
+                other_added, other_removed, other_modified));
+        }
+
+        output
+    }
+
+    fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
+        // Replace newlines with visible markers
+        let cleaned: String = s.chars()
+            .map(|c| if c == '\n' { '↵' } else { c })
+            .collect();
+
+        if cleaned.len() <= max_len {
+            cleaned
+        } else {
+            // Find a valid char boundary at or before max_len
+            let mut end = max_len;
+            while end > 0 && !cleaned.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &cleaned[..end])
+        }
+    }
+
     fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
         use profiling::Timer;
         let _timer = Timer::new("calculate_line_statistics");
@@ -212,7 +282,7 @@ impl StructuralDiff {
                     declarations_removed += 1;
                 }
                 ChangeType::Modification => {
-                    if change.description.contains("structure changed") {
+                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
                         declarations_modified += 1;
                     }
                 }
@@ -340,12 +410,14 @@ impl StructuralDiff {
         let size = structural_hashes.len();
         let minhash_signature = self.compute_minhash(&structural_hashes, 128);
         
-        // Extract fingerprint for better matching
-        let fingerprint = if self.use_fingerprints && matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
+        // Extract fingerprint for string diffing (always) and matching (when enabled)
+        // We always extract fingerprints so we can detect string content changes
+        // even when fingerprint-based matching is disabled
+        let fingerprint = if matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
             let _timer = profiling::Timer::new("extract_fingerprint");
             let extractor = FingerprintExtractor::new(source);
             let fp = extractor.extract_function_fingerprint(node);
-            
+
             // Debug fingerprints
             if std::env::var("ASTDIFF_DEBUG").is_ok() && !fp.strings.is_empty() {
                 eprintln!("Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
@@ -359,7 +431,7 @@ impl StructuralDiff {
                     eprintln!("  String: '{}' ({:?})", s.value, s.context);
                 }
             }
-            
+
             Some(fp)
         } else {
             None
@@ -762,8 +834,8 @@ impl StructuralDiff {
                 ChangeType::Addition => additions.push(change),
                 ChangeType::Deletion => deletions.push(change),
                 ChangeType::Modification => {
-                    // Separate structural changes from simple renames
-                    if change.description.contains("structure changed") {
+                    // Separate structural/text changes from simple renames
+                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
                         structural_changes.push(change);
                     } else if change.description.contains("matched with") {
                         renames.push(change);
@@ -811,6 +883,10 @@ impl StructuralDiff {
                 }
                 if let Some(loc) = &change.location2 {
                     println!("  + at line {}: {}", loc.line, loc.code_snippet);
+                }
+                // Show string diff if present
+                if let Some(ref string_diff) = change.string_diff {
+                    print!("{}", self.format_string_diff(string_diff));
                 }
             }
             println!();
@@ -902,15 +978,20 @@ impl StructuralDiff {
             println!("=== Modified Functions ===");
             for change in structural_changes {
                 println!("\n@@@ {}", change.description);
-                
+
+                // Show string diff if present
+                if let Some(ref string_diff) = change.string_diff {
+                    print!("{}", self.format_string_diff(string_diff));
+                }
+
                 // Show unified diff of the canonical versions
-                if let (Some(loc1), Some(loc2), Some(can1), Some(can2)) = 
+                if let (Some(loc1), Some(loc2), Some(can1), Some(can2)) =
                     (&change.location1, &change.location2, canonical1, canonical2) {
-                    
+
                     // Extract the function from both canonical versions
                     let func1 = self.extract_function_at_line(can1, loc1.line);
                     let func2 = self.extract_function_at_line(can2, loc2.line);
-                    
+
                     if let (Some(f1), Some(f2)) = (func1, func2) {
                         self.print_unified_diff(&f1, &f2);
                     }
@@ -1048,7 +1129,8 @@ impl StructuralDiff {
                 ChangeType::Addition => additions.push(change),
                 ChangeType::Deletion => deletions.push(change),
                 ChangeType::Modification => {
-                    if change.description.contains("structure changed") {
+                    // Separate structural/text changes from simple renames
+                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
                         structural_changes.push(change);
                     } else if change.description.contains("matched with") {
                         renames.push(change);
@@ -1057,7 +1139,7 @@ impl StructuralDiff {
                 ChangeType::Reorder => {} // Ignore reorders
             }
         }
-        
+
         println!("Changes: {} additions, {} deletions, {} modifications (+ {} renames)", 
                  additions.len(), deletions.len(), structural_changes.len(), renames.len());
         println!();
@@ -1093,11 +1175,16 @@ impl StructuralDiff {
             println!("=== Modified Functions ===");
             for change in structural_changes {
                 println!("\n@@@ {}", change.description);
-                
+
+                // Show string diff if present
+                if let Some(ref string_diff) = change.string_diff {
+                    print!("{}", self.format_string_diff(string_diff));
+                }
+
                 if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
                     println!("\n--- {}:{} (before)", file1.display(), loc1.line);
                     self.print_original_function(source1, loc1.line, "- ");
-                    
+
                     println!("\n+++ {}:{} (after)", file2.display(), loc2.line);
                     self.print_original_function(source2, loc2.line, "+ ");
                 }
@@ -1186,6 +1273,150 @@ impl StructuralDiff {
         Ok(())
     }
     
+    pub fn print_lite(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf) {
+        // Get just the filenames for display
+        let file1_name = file1.file_name().unwrap_or(file1.as_os_str()).to_string_lossy();
+        let file2_name = file2.file_name().unwrap_or(file2.as_os_str()).to_string_lossy();
+        
+        // Group changes by type
+        let mut additions = Vec::new();
+        let mut deletions = Vec::new();
+        let mut modifications = Vec::new();
+        
+        for change in &result.changes {
+            match change.change_type {
+                ChangeType::Addition => additions.push(change),
+                ChangeType::Deletion => deletions.push(change),
+                ChangeType::Modification => modifications.push(change),
+                ChangeType::Reorder => {} // Ignore reorders in lite view
+            }
+        }
+        
+        // Show deletions
+        if !deletions.is_empty() {
+            println!("=== Removed ===");
+            for change in &deletions {
+                if let Some(loc) = &change.location1 {
+                    // Extract just the name from the description
+                    let name = change.description
+                        .strip_prefix("Removed ")
+                        .and_then(|s| s.split(" '").nth(1))
+                        .and_then(|s| s.strip_suffix("'"))
+                        .unwrap_or(&change.description);
+                    let line_range = if let Some(end) = loc.end_line {
+                        if end > loc.line {
+                            format!("{}-{}", loc.line, end)
+                        } else {
+                            loc.line.to_string()
+                        }
+                    } else {
+                        loc.line.to_string()
+                    };
+                    println!("- {} ({}:{})", name, file1_name, line_range);
+                }
+            }
+        }
+        
+        // Show additions  
+        if !additions.is_empty() {
+            if !deletions.is_empty() {
+                println!();
+            }
+            println!("=== Added ===");
+            for change in &additions {
+                if let Some(loc) = &change.location2 {
+                    // Extract just the name from the description
+                    let name = change.description
+                        .strip_prefix("Added ")
+                        .and_then(|s| s.split(" '").nth(1))
+                        .and_then(|s| s.strip_suffix("'"))
+                        .unwrap_or(&change.description);
+                    let line_range = if let Some(end) = loc.end_line {
+                        if end > loc.line {
+                            format!("{}-{}", loc.line, end)
+                        } else {
+                            loc.line.to_string()
+                        }
+                    } else {
+                        loc.line.to_string()
+                    };
+                    println!("+ {} ({}:{})", name, file2_name, line_range);
+                }
+            }
+        }
+        
+        // Show modifications with separation between pairs
+        if !modifications.is_empty() {
+            if !deletions.is_empty() || !additions.is_empty() {
+                println!();
+            }
+            println!("=== Modified ===");
+            for (i, change) in modifications.iter().enumerate() {
+                if i > 0 {
+                    println!(); // Add blank line between modification pairs
+                }
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    // Extract names from descriptions like "function 'foo' matched with 'bar'" or "function 'foo' structure changed"
+                    if change.description.contains("matched with") {
+                        // This is a rename
+                        let parts: Vec<&str> = change.description.split("'").collect();
+                        if parts.len() >= 4 {
+                            let old_name = parts[1];
+                            let new_name = parts[3];
+                            let line_range1 = if let Some(end) = loc1.end_line {
+                                if end > loc1.line {
+                                    format!("{}-{}", loc1.line, end)
+                                } else {
+                                    loc1.line.to_string()
+                                }
+                            } else {
+                                loc1.line.to_string()
+                            };
+                            let line_range2 = if let Some(end) = loc2.end_line {
+                                if end > loc2.line {
+                                    format!("{}-{}", loc2.line, end)
+                                } else {
+                                    loc2.line.to_string()
+                                }
+                            } else {
+                                loc2.line.to_string()
+                            };
+                            println!("- {} ({}:{})", old_name, file1_name, line_range1);
+                            println!("+ {} ({}:{})", new_name, file2_name, line_range2);
+                        }
+                    } else if change.description.contains("structure changed") {
+                        // This is a structural change
+                        let name = change.description
+                            .split(" '")
+                            .nth(1)
+                            .and_then(|s| s.split("'").next())
+                            .unwrap_or(&change.description);
+                        let line_range1 = if let Some(end) = loc1.end_line {
+                            if end > loc1.line {
+                                format!("{}-{}", loc1.line, end)
+                            } else {
+                                loc1.line.to_string()
+                            }
+                        } else {
+                            loc1.line.to_string()
+                        };
+                        let line_range2 = if let Some(end) = loc2.end_line {
+                            if end > loc2.line {
+                                format!("{}-{}", loc2.line, end)
+                            } else {
+                                loc2.line.to_string()
+                            }
+                        } else {
+                            loc2.line.to_string()
+                        };
+                        println!("- {} ({}:{})", name, file1_name, line_range1);
+                        println!("+ {} ({}:{})", name, file2_name, line_range2);
+                    }
+                }
+            }
+        }
+    }
+    
     pub fn print_compact(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
                          source1: &str, source2: &str) {
         println!("--- {}", file1.display());
@@ -1209,8 +1440,8 @@ impl StructuralDiff {
                 ChangeType::Addition => additions.push(change),
                 ChangeType::Deletion => deletions.push(change),
                 ChangeType::Modification => {
-                    // Separate structural changes from simple renames
-                    if change.description.contains("structure changed") {
+                    // Separate structural/text changes from simple renames
+                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
                         structural_changes.push(change);
                     } else if change.description.contains("matched with") {
                         renames.push(change);
@@ -1248,6 +1479,10 @@ impl StructuralDiff {
             for change in &structural_changes {
                 if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
                     println!("\n@@@ {}", change.description);
+                    // Show string diff if present
+                    if let Some(ref string_diff) = change.string_diff {
+                        print!("{}", self.format_string_diff(string_diff));
+                    }
                     println!("\n--- {}:{} (before)", file1.display(), loc1.line);
                     println!("+++ {}:{} (after)", file2.display(), loc2.line);
                 }
