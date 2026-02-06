@@ -336,31 +336,37 @@ impl ParallelMatcherV2 {
                 continue;
             }
 
-            // Normalize: apply rename map to source2, then blank minified identifiers on both
-            let (norm_s1, norm_s2) = if !rename_map.is_empty() {
-                let renamed = fingerprint::normalize_string_with_renames(&src2, &rename_map);
+            // Normalize pipeline (order matters — keywords must survive for stripping):
+            // 1. Comparison normalization on RAW source (canonicalize imports, strip
+            //    var/let/const, strip trailing punct, collapse whitespace)
+            // 2. Apply rename map to pre-normalized source2
+            // 3. Blank minified identifiers on both
+            let is_import = matches!(decl1.kind, DeclarationKind::Import);
+            let pre_s1 = fingerprint::normalize_for_comparison(&src1, is_import);
+            let pre_s2 = fingerprint::normalize_for_comparison(&src2, is_import);
+
+            let (comp_s1, comp_s2) = if !rename_map.is_empty() {
+                let renamed = fingerprint::normalize_string_with_renames(&pre_s2, &rename_map);
                 (
-                    fingerprint::normalize_minified_identifiers(&src1),
+                    fingerprint::normalize_minified_identifiers(&pre_s1),
                     fingerprint::normalize_minified_identifiers(&renamed),
                 )
             } else {
                 (
-                    fingerprint::normalize_minified_identifiers(&src1),
-                    fingerprint::normalize_minified_identifiers(&src2),
+                    fingerprint::normalize_minified_identifiers(&pre_s1),
+                    fingerprint::normalize_minified_identifiers(&pre_s2),
                 )
             };
 
-            // Compare normalized texts
-            if norm_s1 == norm_s2 {
-                // Pure rename or identical — no change entry needed unless names differ
-                // (for rename map tracking in output)
+            // Compare with aggressive normalization
+            if comp_s1 == comp_s2 {
                 unchanged_count += 1;
                 continue;
             }
 
-            // Generate display diff: normalized comparison, original display
+            // Generate display diff using comparison normalization for LCS alignment
             let display_diff = StructuralDiff::generate_normalized_display_diff(
-                &src1, &src2, &norm_s1, &norm_s2, 3,
+                &src1, &src2, &comp_s1, &comp_s2, 3,
             );
 
             if display_diff.is_empty() {

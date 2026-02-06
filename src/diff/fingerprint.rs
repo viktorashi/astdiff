@@ -285,6 +285,105 @@ fn looks_minified(s: &str) -> bool {
     s.len() <= 4
 }
 
+/// Additional normalization for comparison domain. Applied AFTER rename + minified ident
+/// normalization. Handles minifier noise that survives identifier-level normalization:
+/// - Import canonicalization: reduce to just `import _ from <module>;`
+/// - Trailing punctuation: strip `,` and `;` from line ends
+/// - Declaration keywords: strip leading `var`/`let`/`const`
+/// - Whitespace: collapse runs to single space, trim lines
+///
+/// Applied symmetrically to both sides. The display diff still shows original text.
+pub fn normalize_for_comparison(s: &str, is_import: bool) -> String {
+    if is_import {
+        return canonicalize_import(s);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for line in s.lines() {
+        let mut l = line.to_string();
+
+        // Strip leading var/let/const
+        l = strip_declaration_keyword(&l);
+
+        // Strip trailing , or ;
+        let trimmed = l.trim_end();
+        if trimmed.ends_with(',') || trimmed.ends_with(';') {
+            let new_end = trimmed.len() - 1;
+            l = format!("{}{}", &trimmed[..new_end], &l[trimmed.len()..]);
+        }
+
+        // Collapse whitespace
+        let collapsed: String = collapse_whitespace(l.trim());
+        lines.push(collapsed);
+    }
+
+    lines.join("\n")
+}
+
+/// Canonicalize an import statement to just its module specifier.
+/// `import { foo as bar } from "module";` → `import _ from "module";`
+/// `import * as baz from "module";`       → `import _ from "module";`
+/// Handles multiline destructured imports.
+fn canonicalize_import(s: &str) -> String {
+    // Find the `from "..."` or `from '...'` part
+    // Search backwards from the end for `from` followed by a string literal
+    let search = s.to_ascii_lowercase();
+    if let Some(from_pos) = search.rfind("from") {
+        let after_from = &s[from_pos + 4..];
+        let trimmed = after_from.trim();
+        // Extract the module string (first quoted string)
+        if let Some(module) = extract_module_string(trimmed) {
+            return format!("import _ from {}", module);
+        }
+    }
+    // Fallback: just return the original
+    s.to_string()
+}
+
+/// Extract a quoted string from the start of a string slice.
+/// Returns the full quoted string including delimiters.
+fn extract_module_string(s: &str) -> Option<String> {
+    let quote = s.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    // Find closing quote
+    for (i, ch) in s.char_indices().skip(1) {
+        if ch == quote {
+            return Some(s[..i + 1].to_string());
+        }
+    }
+    None
+}
+
+fn strip_declaration_keyword(line: &str) -> String {
+    let trimmed = line.trim_start();
+    for keyword in &["var ", "let ", "const "] {
+        if trimmed.starts_with(keyword) {
+            let indent_len = line.len() - trimmed.len();
+            return format!("{}{}", &line[..indent_len], &trimmed[keyword.len()..]);
+        }
+    }
+    line.to_string()
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_was_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_was_space {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            result.push(ch);
+            prev_was_space = false;
+        }
+    }
+    result
+}
+
 /// Classify diff text as StringOnly or Structural.
 /// Examines changed line pairs: strips string literals, compares remaining "skeletons".
 /// If all skeletons match, the change is StringOnly. Otherwise Structural.
