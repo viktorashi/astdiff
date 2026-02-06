@@ -131,6 +131,17 @@ impl std::fmt::Display for DeclarationKind {
     }
 }
 
+/// Classification of a matched declaration pair based on normalized diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffClassification {
+    /// Empty normalized diff — pure rename or identical
+    Unchanged,
+    /// Only string literal values changed (code skeleton identical)
+    StringOnly,
+    /// Code logic changed (structural differences beyond strings)
+    Structural,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffResult {
     pub identical: bool,
@@ -154,6 +165,15 @@ pub struct Change {
     /// String constant changes for modified functions (text diffs like system prompts)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub string_diff: Option<StringDiff>,
+    /// Classification derived from normalized diff (None for Add/Delete)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<DiffClassification>,
+    /// The display diff (original text, normalized comparison). Empty if Unchanged.
+    #[serde(skip)]
+    pub display_diff: String,
+    /// Similarity score for matched pairs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +190,20 @@ pub struct Location {
     pub column: usize,
     pub code_snippet: String,
     pub end_line: Option<usize>,  // Optional end line for line ranges
+}
+
+/// Extract source text by line range. O(1) with pre-built line vector.
+/// Lines are 1-indexed (matching tree-sitter convention).
+pub fn extract_source_range(lines: &[&str], start_line: usize, end_line: usize) -> String {
+    if start_line == 0 || start_line > lines.len() {
+        return String::new();
+    }
+    let start = start_line - 1; // Convert to 0-indexed
+    let end = end_line.min(lines.len());
+    if start >= end {
+        return String::new();
+    }
+    lines[start..end].join("\n")
 }
 
 impl StructuralDiff {
@@ -277,33 +311,26 @@ impl StructuralDiff {
     }
 
     fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
-        use profiling::Timer;
-        let _timer = Timer::new("calculate_line_statistics");
-        
-        // For AST diffs, count declarations rather than lines
-        // This is more meaningful for minified code where single declarations can be thousands of lines
         let mut declarations_added = 0;
         let mut declarations_removed = 0;
         let mut declarations_modified = 0;
-        
+
         for change in &result.changes {
             match change.change_type {
-                ChangeType::Addition => {
-                    declarations_added += 1;
-                }
-                ChangeType::Deletion => {
-                    declarations_removed += 1;
-                }
+                ChangeType::Addition => declarations_added += 1,
+                ChangeType::Deletion => declarations_removed += 1,
                 ChangeType::Modification => {
-                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
-                        declarations_modified += 1;
+                    match change.classification.as_ref() {
+                        Some(DiffClassification::Structural) | Some(DiffClassification::StringOnly) => {
+                            declarations_modified += 1;
+                        }
+                        _ => {}
                     }
                 }
-                ChangeType::Reorder => {} // Don't count reorders
+                ChangeType::Reorder => {}
             }
         }
-        
-        // Return declaration counts instead of line counts
+
         (declarations_added, declarations_removed, declarations_added + declarations_removed + declarations_modified)
     }
     
@@ -378,74 +405,28 @@ impl StructuralDiff {
         Ok(result)
     }
     
-    pub fn compare_declarations(&self, declarations1: Vec<Declaration>, declarations2: Vec<Declaration>, 
+    pub fn compare_declarations(&self, declarations1: Vec<Declaration>, declarations2: Vec<Declaration>,
                               source1: &str, source2: &str) -> Result<DiffResult> {
         use profiling::Timer;
-        
-        eprintln!("Extracted {} declarations from file1, {} from file2", 
+
+        eprintln!("Extracted {} declarations from file1, {} from file2",
                  declarations1.len(), declarations2.len());
-        
-        // Match declarations based on similarity
-        let (matches, mut changes) = {
+
+        // Match declarations — now returns rename map and pre-classified changes
+        let (matches, changes, rename_map) = {
             let _timer = Timer::new("match_declarations_total");
             self.match_declarations(&declarations1, &declarations2, source1, source2)
         };
-        
+
         let matched_declarations = matches.len();
         let total_declarations1 = declarations1.len();
         let total_declarations2 = declarations2.len();
-        
+
         let similarity = if total_declarations1 == 0 && total_declarations2 == 0 {
             1.0
         } else {
             matched_declarations as f64 / total_declarations1.max(total_declarations2) as f64
         };
-        
-        // Build inverted rename map (new_name → old_name) from matched declarations
-        let mut rename_map = HashMap::new();
-        for change in &changes {
-            if let ChangeType::Modification = change.change_type {
-                if change.description.contains("matched with") {
-                    if let Some(path) = change.structural_path.strip_prefix("global.") {
-                        if let Some((old_name, new_name)) = path.split_once("->") {
-                            rename_map.insert(new_name.to_string(), old_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Post-process: re-evaluate "text constant changes" with rename normalization.
-        // Two-stage normalization:
-        // 1. Apply rename map (top-level declaration references)
-        // 2. Normalize all short minified identifiers to "_" (local variables, module refs)
-        if !rename_map.is_empty() {
-            changes.retain(|change| {
-                if let ChangeType::Modification = change.change_type {
-                    if change.description.contains("text constant changes") {
-                        if let Some(ref string_diff) = change.string_diff {
-                            let has_real_changes = string_diff.important_changes.iter().any(|sc| {
-                                match sc {
-                                    fingerprint::StringChange::Modified { old, new, .. } => {
-                                        // Stage 1: Apply rename map to new value
-                                        let renamed = fingerprint::normalize_string_with_renames(
-                                            &new.value, &rename_map,
-                                        );
-                                        // Stage 2: Normalize minified identifiers in both
-                                        let norm_old = fingerprint::normalize_minified_identifiers(&old.value);
-                                        let norm_new = fingerprint::normalize_minified_identifiers(&renamed);
-                                        norm_new != norm_old
-                                    }
-                                    _ => true,
-                                }
-                            });
-                            return has_real_changes;
-                        }
-                    }
-                }
-                true
-            });
-        }
 
         Ok(DiffResult {
             identical: changes.is_empty(),
@@ -871,48 +852,52 @@ impl StructuralDiff {
     
     
         
-    pub fn print_summary(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf, 
+    pub fn print_summary(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
                          source1: &str, source2: &str) {
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
-        println!("Matched declarations: {}/{} vs {}", 
+        println!("Matched declarations: {}/{} vs {}",
                  result.matched_declarations, result.total_declarations1, result.total_declarations2);
-        
+
         // Calculate and print line statistics
         let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
         println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
-        
-        // Group changes by type
+
+        // Group changes by type using classification
         let mut additions = Vec::new();
         let mut deletions = Vec::new();
         let mut structural_changes = Vec::new();
-        let mut renames = Vec::new();
-        
+        let mut string_changes = Vec::new();
+
         for change in &result.changes {
             match change.change_type {
                 ChangeType::Addition => additions.push(change),
                 ChangeType::Deletion => deletions.push(change),
                 ChangeType::Modification => {
-                    // Separate structural/text changes from simple renames
-                    if change.description.contains("structure changed") || change.description.contains("text constant changes") {
-                        structural_changes.push(change);
-                    } else if change.description.contains("matched with") {
-                        renames.push(change);
+                    match change.classification.as_ref() {
+                        Some(DiffClassification::Structural) => structural_changes.push(change),
+                        Some(DiffClassification::StringOnly) => string_changes.push(change),
+                        _ => {} // Unchanged — not shown
                     }
                 }
-                ChangeType::Reorder => {} // Ignore reorders
+                ChangeType::Reorder => {}
             }
         }
-        
-        let meaningful_changes = additions.len() + deletions.len() + structural_changes.len();
-        println!("Meaningful changes: {} (+ {} renames)", meaningful_changes, renames.len());
+
+        let total_unchanged = result.matched_declarations
+            .saturating_sub(structural_changes.len())
+            .saturating_sub(string_changes.len());
+
+        println!("Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
+            additions.len(), deletions.len(), structural_changes.len(),
+            string_changes.len(), total_unchanged);
         println!();
-        
-        // Show deletions first
+
+        // Show deletions
         if !deletions.is_empty() {
-            println!("=== Removed Functions ===");
-            for change in deletions {
+            println!("=== Removed ===");
+            for change in &deletions {
                 println!("--- {}", change.description);
                 if let Some(loc) = &change.location1 {
                     println!("    at line {}: {}", loc.line, loc.code_snippet);
@@ -920,11 +905,11 @@ impl StructuralDiff {
             }
             println!();
         }
-        
+
         // Show additions
         if !additions.is_empty() {
-            println!("=== Added Functions ===");
-            for change in additions {
+            println!("=== Added ===");
+            for change in &additions {
                 println!("+++ {}", change.description);
                 if let Some(loc) = &change.location2 {
                     println!("    at line {}: {}", loc.line, loc.code_snippet);
@@ -932,11 +917,11 @@ impl StructuralDiff {
             }
             println!();
         }
-        
+
         // Show structural changes
         if !structural_changes.is_empty() {
-            println!("=== Structurally Modified Functions ===");
-            for change in structural_changes {
+            println!("=== Structural Changes ===");
+            for change in &structural_changes {
                 println!("@@@ {}", change.description);
                 if let Some(loc) = &change.location1 {
                     println!("  - at line {}: {}", loc.line, loc.code_snippet);
@@ -944,22 +929,20 @@ impl StructuralDiff {
                 if let Some(loc) = &change.location2 {
                     println!("  + at line {}: {}", loc.line, loc.code_snippet);
                 }
-                // Show string diff if present
-                if let Some(ref string_diff) = change.string_diff {
-                    print!("{}", self.format_string_diff(string_diff));
-                }
             }
             println!();
         }
-        
-        // Optionally show renames in verbose mode
-        if !renames.is_empty() && std::env::var("ASTDIFF_SHOW_RENAMES").is_ok() {
-            println!("=== Renamed Functions (set ASTDIFF_SHOW_RENAMES to see) ===");
-            for change in renames {
-                if let Some(path) = change.structural_path.split("->").nth(1) {
-                    println!("  {} -> {}", 
-                        change.structural_path.split("->").next().unwrap_or("").replace("global.", ""),
-                        path);
+
+        // Show string changes
+        if !string_changes.is_empty() {
+            println!("=== String Changes ===");
+            for change in &string_changes {
+                println!("@@@ {}", change.description);
+                if let Some(loc) = &change.location1 {
+                    println!("  - at line {}: {}", loc.line, loc.code_snippet);
+                }
+                if let Some(loc) = &change.location2 {
+                    println!("  + at line {}: {}", loc.line, loc.code_snippet);
                 }
             }
             println!();
@@ -1137,7 +1120,7 @@ impl StructuralDiff {
     /// for display. This eliminates rename noise from the diff while keeping the output
     /// readable. The normalized texts must have the same line count as the originals
     /// (normalization only substitutes within lines, never adds/removes lines).
-    fn generate_normalized_display_diff(
+    pub fn generate_normalized_display_diff(
         orig1: &str, orig2: &str,
         norm1: &str, norm2: &str,
         context_lines: usize,
@@ -1372,6 +1355,217 @@ impl StructuralDiff {
         }
     }
     
+    /// New default output: grouped by classification, using pre-computed display_diff.
+    pub fn print_default(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
+                         source1: &str, source2: &str) -> Result<()> {
+        let file1_name = file1.file_name().unwrap_or(file1.as_os_str()).to_string_lossy();
+        let file2_name = file2.file_name().unwrap_or(file2.as_os_str()).to_string_lossy();
+
+        println!("--- {}", file1.display());
+        println!("+++ {}", file2.display());
+        println!("Structural similarity: {:.1}%", result.similarity * 100.0);
+        println!("Matched: {}/{} vs {}",
+            result.matched_declarations, result.total_declarations1, result.total_declarations2);
+
+        // Classify changes
+        let mut additions = Vec::new();
+        let mut deletions = Vec::new();
+        let mut structural = Vec::new();
+        let mut string_only = Vec::new();
+        for change in &result.changes {
+            match change.change_type {
+                ChangeType::Addition => additions.push(change),
+                ChangeType::Deletion => deletions.push(change),
+                ChangeType::Modification => {
+                    match change.classification.as_ref() {
+                        Some(DiffClassification::Structural) => structural.push(change),
+                        Some(DiffClassification::StringOnly) => string_only.push(change),
+                        Some(DiffClassification::Unchanged) | None => {}
+                    }
+                }
+                ChangeType::Reorder => {} // Implicit in location
+            }
+        }
+
+        // Count unchanged as: matched - structural - string_only
+        let total_unchanged = result.matched_declarations
+            .saturating_sub(structural.len())
+            .saturating_sub(string_only.len());
+
+        println!("Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
+            additions.len(), deletions.len(), structural.len(), string_only.len(), total_unchanged);
+        println!();
+
+        // === Removed ===
+        if !deletions.is_empty() {
+            println!("=== Removed ===");
+            let lines1: Vec<&str> = source1.lines().collect();
+            for change in &deletions {
+                if let Some(loc) = &change.location1 {
+                    let end = loc.end_line.unwrap_or(loc.line);
+                    println!("\n--- Removed {} ({}:{}-{})",
+                        Self::extract_name_from_desc(&change.description),
+                        file1_name, loc.line, end);
+                    let body = extract_source_range(&lines1, loc.line, end);
+                    for line in body.lines() {
+                        println!("- {}", line);
+                    }
+                }
+            }
+            println!();
+        }
+
+        // === Added ===
+        if !additions.is_empty() {
+            println!("=== Added ===");
+            let lines2: Vec<&str> = source2.lines().collect();
+            for change in &additions {
+                if let Some(loc) = &change.location2 {
+                    let end = loc.end_line.unwrap_or(loc.line);
+                    println!("\n+++ Added {} ({}:{}-{})",
+                        Self::extract_name_from_desc(&change.description),
+                        file2_name, loc.line, end);
+                    let body = extract_source_range(&lines2, loc.line, end);
+                    for line in body.lines() {
+                        println!("+ {}", line);
+                    }
+                }
+            }
+            println!();
+        }
+
+        // === Structural Changes ===
+        if !structural.is_empty() {
+            println!("=== Structural Changes ===");
+            for change in &structural {
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    println!("\n@@@ {}", change.description);
+                    println!("--- {}:{}", file1_name, loc1.line);
+                    println!("+++ {}:{}", file2_name, loc2.line);
+                    if !change.display_diff.is_empty() {
+                        print!("{}", change.display_diff);
+                    }
+                }
+            }
+            println!();
+        }
+
+        // === String Changes ===
+        if !string_only.is_empty() {
+            println!("=== String Changes ===");
+            for change in &string_only {
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    println!("\n@@@ {}", change.description);
+                    println!("--- {}:{}", file1_name, loc1.line);
+                    println!("+++ {}:{}", file2_name, loc2.line);
+                    if !change.display_diff.is_empty() {
+                        print!("{}", change.display_diff);
+                    }
+                }
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    /// Compact output: location-only summary grouped by classification.
+    pub fn print_compact_locations(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf) {
+        let file1_name = file1.file_name().unwrap_or(file1.as_os_str()).to_string_lossy();
+        let file2_name = file2.file_name().unwrap_or(file2.as_os_str()).to_string_lossy();
+
+        // Classify changes
+        let mut additions = Vec::new();
+        let mut deletions = Vec::new();
+        let mut structural = Vec::new();
+        let mut string_only = Vec::new();
+
+        for change in &result.changes {
+            match change.change_type {
+                ChangeType::Addition => additions.push(change),
+                ChangeType::Deletion => deletions.push(change),
+                ChangeType::Modification => {
+                    match change.classification.as_ref() {
+                        Some(DiffClassification::Structural) => structural.push(change),
+                        Some(DiffClassification::StringOnly) => string_only.push(change),
+                        _ => {} // Unchanged — not shown
+                    }
+                }
+                ChangeType::Reorder => {}
+            }
+        }
+
+        let total_unchanged = result.matched_declarations
+            .saturating_sub(structural.len())
+            .saturating_sub(string_only.len());
+
+        // Removed
+        if !deletions.is_empty() {
+            println!("Removed: {}", deletions.len());
+            for change in &deletions {
+                if let Some(loc) = &change.location1 {
+                    let end = loc.end_line.unwrap_or(loc.line);
+                    let name = Self::extract_name_from_desc(&change.description);
+                    println!("  {} ({}:{}-{})", name, file1_name, loc.line, end);
+                }
+            }
+            println!();
+        }
+
+        // Added
+        if !additions.is_empty() {
+            println!("Added: {}", additions.len());
+            for change in &additions {
+                if let Some(loc) = &change.location2 {
+                    let end = loc.end_line.unwrap_or(loc.line);
+                    let name = Self::extract_name_from_desc(&change.description);
+                    println!("  {} ({}:{}-{})", name, file2_name, loc.line, end);
+                }
+            }
+            println!();
+        }
+
+        // Structural
+        if !structural.is_empty() {
+            println!("Structural: {}", structural.len());
+            for change in &structural {
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    let name = Self::extract_name_from_desc(&change.description);
+                    let sim = change.similarity_score.map(|s| format!(" {:.1}%", s * 100.0)).unwrap_or_default();
+                    println!("  {} ({}:{} -> {}:{}){}",
+                        name, file1_name, loc1.line, file2_name, loc2.line, sim);
+                }
+            }
+            println!();
+        }
+
+        // String-only
+        if !string_only.is_empty() {
+            println!("String-only: {}", string_only.len());
+            for change in &string_only {
+                if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
+                    let name = Self::extract_name_from_desc(&change.description);
+                    println!("  {} ({}:{} -> {}:{})",
+                        name, file1_name, loc1.line, file2_name, loc2.line);
+                }
+            }
+            println!();
+        }
+
+        println!("Unchanged: {} (not shown)", total_unchanged);
+    }
+
+    /// Extract declaration name from a description string.
+    fn extract_name_from_desc(desc: &str) -> &str {
+        // Try patterns like "function 'foo' ..." or "Removed function 'foo'"
+        if let Some(start) = desc.find('\'') {
+            if let Some(end) = desc[start+1..].find('\'') {
+                return &desc[start+1..start+1+end];
+            }
+        }
+        desc
+    }
+
     pub fn print_side_by_side(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
                                source1: &str, source2: &str) {
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
@@ -1742,20 +1936,20 @@ impl StructuralDiff {
         }
     }
     
-    pub fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str) 
-        -> (Vec<(usize, usize)>, Vec<Change>) {
+    pub fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str)
+        -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
         use parallel_matching_v2::ParallelMatcherV2;
         use profiling::Timer;
-        
+
         eprintln!("Using parallel matching v2 for {} x {} declarations", decls1.len(), decls2.len());
-        
+
         // Convert to thread-safe data structures
         let data1: Vec<DeclarationData> = {
             let _timer = Timer::new("convert_to_data_structures");
             decls1.iter().map(|d| d.to_data()).collect()
         };
         let data2: Vec<DeclarationData> = decls2.iter().map(|d| d.to_data()).collect();
-        
+
         // Build rarity scorer if using fingerprints
         let scorer = if self.use_fingerprints {
             let _timer = Timer::new("build_rarity_scorer_parallel");
@@ -1769,9 +1963,9 @@ impl StructuralDiff {
         } else {
             None
         };
-        
+
         let matcher = ParallelMatcherV2::new(self.use_fingerprints);
-        
+
         matcher.match_declarations(
             &data1,
             &data2,

@@ -1,5 +1,6 @@
-use super::{DeclarationData, DeclarationKind, Change, ChangeType};
-use super::fingerprint::{FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer, compute_string_diff, StringDiff};
+use std::collections::HashMap;
+use super::{DeclarationData, DeclarationKind, Change, ChangeType, DiffClassification};
+use super::fingerprint::{self, FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer, StringDiff};
 use super::matching_report::EvidenceBreakdown;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,25 +47,25 @@ impl ParallelMatcherV2 {
         scorer: Option<&RarityScorer>,
         calculate_similarity: impl Fn(&DeclarationData, &DeclarationData, &str, &str) -> f64 + Sync,
         create_evidence: impl Fn(&DeclarationData, &DeclarationData, &FunctionFingerprint, &FunctionFingerprint, &RarityScorer) -> EvidenceBreakdown + Sync,
-    ) -> (Vec<(usize, usize)>, Vec<Change>) {
+    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
         use super::profiling::Timer;
-        
+
         // Step 1: Build all potential pairs with size filtering
         let pairs = {
             let _timer = Timer::new("build_candidate_pairs");
             self.build_candidate_pairs(decls1, decls2)
         };
-        
+
         eprintln!("Built {} candidate pairs to check", pairs.len());
-        
+
         // Step 2: Parallel LSH filtering
         let lsh_candidates = {
             let _timer = Timer::new("parallel_lsh_filter");
             self.parallel_lsh_filter(&pairs, decls1, decls2)
         };
-        
+
         eprintln!("LSH filtering reduced to {} candidates", lsh_candidates.len());
-        
+
         // Step 3: Parallel full similarity calculation for remaining candidates
         let similarity_results = {
             let _timer = Timer::new("parallel_full_similarity");
@@ -79,14 +80,14 @@ impl ParallelMatcherV2 {
                 &create_evidence,
             )
         };
-        
-        // Step 4: Resolve best matches (sequential, but fast)
-        let (matches, changes) = {
+
+        // Step 4: Resolve best matches + normalize/diff all pairs
+        let (matches, changes, rename_map) = {
             let _timer = Timer::new("resolve_matches");
             self.resolve_best_matches(similarity_results, decls1, decls2, source1, source2)
         };
-        
-        (matches, changes)
+
+        (matches, changes, rename_map)
     }
     
     fn build_candidate_pairs(&self, decls1: &[DeclarationData], decls2: &[DeclarationData]) -> Vec<(usize, usize)> {
@@ -263,92 +264,162 @@ impl ParallelMatcherV2 {
         decls2: &[DeclarationData],
         source1: &str,
         source2: &str,
-    ) -> (Vec<(usize, usize)>, Vec<Change>) {
+    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
         use super::profiling::Timer;
-        
+        use super::StructuralDiff;
+
         // Pre-compute source lines to avoid repeated parsing
         let _timer = Timer::new("precompute_source_lines");
         let lines1: Vec<&str> = source1.lines().collect();
         let lines2: Vec<&str> = source2.lines().collect();
+
         // Sort by similarity descending
         results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
-        
+
         let mut matches = Vec::new();
         let mut matched1 = vec![false; decls1.len()];
         let mut matched2 = vec![false; decls2.len()];
         let mut changes = Vec::new();
-        
-        // Greedy matching: take best matches first
-        for result in results {
+
+        // ── Phase A: Greedy matching + build rename map ──
+        let mut rename_map: HashMap<String, String> = HashMap::new();
+        let mut match_data: Vec<(usize, usize, f64)> = Vec::new(); // (i1, i2, similarity)
+
+        for result in &results {
             if !matched1[result.i1] && !matched2[result.i2] {
                 matched1[result.i1] = true;
                 matched2[result.i2] = true;
                 matches.push((result.i1, result.i2));
+                match_data.push((result.i1, result.i2, result.similarity));
 
                 let decl1 = &decls1[result.i1];
                 let decl2 = &decls2[result.i2];
-                
-                // Generate changes for matches
+
+                // Build rename map inline: new_name → old_name
                 if decl1.name != decl2.name {
-                    changes.push(create_change(
-                        ChangeType::Modification,
-                        Some(create_location_with_lines(decl1, &lines1)),
-                        Some(create_location_with_lines(decl2, &lines2)),
-                        format!("{} '{}' matched with '{}'",
-                            kind_to_string(&decl1.kind), decl1.name, decl2.name),
-                        format!("global.{}->{}", decl1.name, decl2.name),
-                        None,
-                    ));
-                }
-
-                if decl1.line != decl2.line {
-                    changes.push(create_change(
-                        ChangeType::Reorder,
-                        Some(create_location_with_lines(decl1, &lines1)),
-                        Some(create_location_with_lines(decl2, &lines2)),
-                        format!("{} '{}' moved from line {} to line {}",
-                            kind_to_string(&decl1.kind), decl1.name, decl1.line, decl2.line),
-                        format!("global.{}", decl1.name),
-                        None,
-                    ));
-                }
-
-                // Check for string content changes (even if structure is similar)
-                let string_diff = match (&decl1.fingerprint, &decl2.fingerprint) {
-                    (Some(fp1), Some(fp2)) => {
-                        let diff = compute_string_diff(fp1, fp2);
-                        if diff.is_empty() { None } else { Some(diff) }
-                    }
-                    _ => None,
-                };
-
-                // Report structural changes OR important string changes
-                let has_structural_change = result.similarity < 0.95 && decl1.signature != decl2.signature;
-                let has_important_string_change = string_diff.as_ref()
-                    .map(|d| d.has_important_changes())
-                    .unwrap_or(false);
-
-                if has_structural_change || has_important_string_change {
-                    let description = if has_structural_change {
-                        format!("{} '{}' structure changed (similarity: {:.1}%)",
-                            kind_to_string(&decl1.kind), decl1.name, result.similarity * 100.0)
-                    } else {
-                        format!("{} '{}' has text constant changes",
-                            kind_to_string(&decl1.kind), decl1.name)
-                    };
-
-                    changes.push(create_change(
-                        ChangeType::Modification,
-                        Some(create_location_with_lines(decl1, &lines1)),
-                        Some(create_location_with_lines(decl2, &lines2)),
-                        description,
-                        format!("global.{}", decl1.name),
-                        string_diff,
-                    ));
+                    rename_map.insert(decl2.name.clone(), decl1.name.clone());
                 }
             }
         }
-        
+
+        eprintln!("Phase A: {} matches, {} renames", matches.len(), rename_map.len());
+
+        // ── Phase B: Normalize + diff all matched pairs ──
+        let mut unchanged_count = 0usize;
+        let mut string_only_count = 0usize;
+        let mut structural_count = 0usize;
+
+        for &(i1, i2, similarity) in &match_data {
+            let decl1 = &decls1[i1];
+            let decl2 = &decls2[i2];
+
+            // Extract source for both declarations
+            let src1 = super::extract_source_range(&lines1, decl1.line, decl1.end_line);
+            let src2 = super::extract_source_range(&lines2, decl2.line, decl2.end_line);
+
+            if src1.is_empty() || src2.is_empty() {
+                // Can't extract source — skip diffing
+                if decl1.name != decl2.name {
+                    changes.push(create_classified_change(
+                        ChangeType::Modification,
+                        Some(create_location_with_lines(decl1, &lines1)),
+                        Some(create_location_with_lines(decl2, &lines2)),
+                        format!("{} '{}' matched with '{}' (was '{}')",
+                            kind_to_string(&decl1.kind), decl2.name, decl1.name, decl1.name),
+                        format!("global.{}->{}", decl1.name, decl2.name),
+                        DiffClassification::Unchanged,
+                        String::new(),
+                        Some(similarity),
+                    ));
+                    unchanged_count += 1;
+                }
+                continue;
+            }
+
+            // Normalize: apply rename map to source2, then blank minified identifiers on both
+            let (norm_s1, norm_s2) = if !rename_map.is_empty() {
+                let renamed = fingerprint::normalize_string_with_renames(&src2, &rename_map);
+                (
+                    fingerprint::normalize_minified_identifiers(&src1),
+                    fingerprint::normalize_minified_identifiers(&renamed),
+                )
+            } else {
+                (
+                    fingerprint::normalize_minified_identifiers(&src1),
+                    fingerprint::normalize_minified_identifiers(&src2),
+                )
+            };
+
+            // Compare normalized texts
+            if norm_s1 == norm_s2 {
+                // Pure rename or identical — no change entry needed unless names differ
+                // (for rename map tracking in output)
+                unchanged_count += 1;
+                continue;
+            }
+
+            // Generate display diff: normalized comparison, original display
+            let display_diff = StructuralDiff::generate_normalized_display_diff(
+                &src1, &src2, &norm_s1, &norm_s2, 3,
+            );
+
+            if display_diff.is_empty() {
+                unchanged_count += 1;
+                continue;
+            }
+
+            // Classify: string-only vs structural
+            let classification = fingerprint::classify_diff_lines(&display_diff);
+
+            let desc = if decl1.name != decl2.name {
+                match classification {
+                    DiffClassification::StringOnly =>
+                        format!("{} '{}' (was '{}') — string-only",
+                            kind_to_string(&decl1.kind), decl2.name, decl1.name),
+                    DiffClassification::Structural =>
+                        format!("{} '{}' (was '{}') — structural ({:.1}%)",
+                            kind_to_string(&decl1.kind), decl2.name, decl1.name, similarity * 100.0),
+                    DiffClassification::Unchanged => unreachable!(),
+                }
+            } else {
+                match classification {
+                    DiffClassification::StringOnly =>
+                        format!("{} '{}' — string-only",
+                            kind_to_string(&decl1.kind), decl1.name),
+                    DiffClassification::Structural =>
+                        format!("{} '{}' — structural ({:.1}%)",
+                            kind_to_string(&decl1.kind), decl1.name, similarity * 100.0),
+                    DiffClassification::Unchanged => unreachable!(),
+                }
+            };
+
+            let structural_path = if decl1.name != decl2.name {
+                format!("global.{}->{}", decl1.name, decl2.name)
+            } else {
+                format!("global.{}", decl1.name)
+            };
+
+            match classification {
+                DiffClassification::StringOnly => string_only_count += 1,
+                DiffClassification::Structural => structural_count += 1,
+                _ => {}
+            }
+
+            changes.push(create_classified_change(
+                ChangeType::Modification,
+                Some(create_location_with_lines(decl1, &lines1)),
+                Some(create_location_with_lines(decl2, &lines2)),
+                desc,
+                structural_path,
+                classification,
+                display_diff,
+                Some(similarity),
+            ));
+        }
+
+        eprintln!("Phase B: {} unchanged, {} string-only, {} structural",
+            unchanged_count, string_only_count, structural_count);
+
         // Add deletions and additions
         for (i, decl) in decls1.iter().enumerate() {
             if !matched1[i] {
@@ -375,8 +446,8 @@ impl ParallelMatcherV2 {
                 ));
             }
         }
-        
-        (matches, changes)
+
+        (matches, changes, rename_map)
     }
 }
 
@@ -423,6 +494,32 @@ fn create_change(
         description,
         structural_path,
         string_diff,
+        classification: None,
+        display_diff: String::new(),
+        similarity_score: None,
+    }
+}
+
+fn create_classified_change(
+    change_type: ChangeType,
+    location1: Option<super::Location>,
+    location2: Option<super::Location>,
+    description: String,
+    structural_path: String,
+    classification: super::DiffClassification,
+    display_diff: String,
+    similarity_score: Option<f64>,
+) -> super::Change {
+    super::Change {
+        change_type,
+        location1,
+        location2,
+        description,
+        structural_path,
+        string_diff: None,
+        classification: Some(classification),
+        display_diff,
+        similarity_score,
     }
 }
 

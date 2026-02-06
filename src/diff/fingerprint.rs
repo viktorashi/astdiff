@@ -285,6 +285,147 @@ fn looks_minified(s: &str) -> bool {
     s.len() <= 4
 }
 
+/// Classify diff text as StringOnly or Structural.
+/// Examines changed line pairs: strips string literals, compares remaining "skeletons".
+/// If all skeletons match, the change is StringOnly. Otherwise Structural.
+pub fn classify_diff_lines(diff_text: &str) -> super::DiffClassification {
+    let mut removed_lines: Vec<&str> = Vec::new();
+    let mut added_lines: Vec<&str> = Vec::new();
+
+    // Collect consecutive blocks of -/+ lines
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix('-') {
+            // Skip hunk headers like "--- file"
+            if rest.starts_with("--") {
+                continue;
+            }
+            removed_lines.push(rest);
+        } else if let Some(rest) = line.strip_prefix('+') {
+            // Skip hunk headers like "+++ file"
+            if rest.starts_with("++") {
+                continue;
+            }
+            added_lines.push(rest);
+        } else if line.starts_with("@@") {
+            // Process accumulated block
+            if !removed_lines.is_empty() || !added_lines.is_empty() {
+                if !blocks_are_string_only(&removed_lines, &added_lines) {
+                    return super::DiffClassification::Structural;
+                }
+                removed_lines.clear();
+                added_lines.clear();
+            }
+        } else {
+            // Context line — process accumulated block
+            if !removed_lines.is_empty() || !added_lines.is_empty() {
+                if !blocks_are_string_only(&removed_lines, &added_lines) {
+                    return super::DiffClassification::Structural;
+                }
+                removed_lines.clear();
+                added_lines.clear();
+            }
+        }
+    }
+
+    // Process final block
+    if !removed_lines.is_empty() || !added_lines.is_empty() {
+        if !blocks_are_string_only(&removed_lines, &added_lines) {
+            return super::DiffClassification::Structural;
+        }
+    }
+
+    super::DiffClassification::StringOnly
+}
+
+/// Check if a block of removed/added lines differs only in string content.
+fn blocks_are_string_only(removed: &[&str], added: &[&str]) -> bool {
+    // If line counts differ, it's structural (added/removed statements)
+    if removed.len() != added.len() {
+        return false;
+    }
+
+    for (r, a) in removed.iter().zip(added.iter()) {
+        let skel_r = strip_string_literals(r);
+        let skel_a = strip_string_literals(a);
+        if skel_r != skel_a {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Strip string literal content from a line, preserving delimiters.
+/// "hello" → "", 'world' → '', `template ${expr}` → `${expr}`
+fn strip_string_literals(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' | '\'' => {
+                let quote = ch;
+                result.push(quote);
+                // Skip until matching unescaped quote
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            chars.next(); // skip escaped char
+                        }
+                        Some(c) if c == quote => {
+                            result.push(quote);
+                            break;
+                        }
+                        None => break,
+                        Some(_) => {} // strip content
+                    }
+                }
+            }
+            '`' => {
+                result.push('`');
+                // Template literal: keep ${...} expressions, strip text
+                let mut depth = 0;
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            chars.next(); // skip escaped char
+                        }
+                        Some('$') if chars.peek() == Some(&'{') => {
+                            result.push_str("${");
+                            chars.next(); // consume '{'
+                            depth += 1;
+                            // Copy the expression until matching '}'
+                            while depth > 0 {
+                                match chars.next() {
+                                    Some('{') => {
+                                        result.push('{');
+                                        depth += 1;
+                                    }
+                                    Some('}') => {
+                                        depth -= 1;
+                                        result.push('}');
+                                    }
+                                    Some(c) => result.push(c),
+                                    None => break,
+                                }
+                            }
+                        }
+                        Some('`') => {
+                            result.push('`');
+                            break;
+                        }
+                        None => break,
+                        Some(_) => {} // strip text content
+                    }
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    result
+}
+
 pub struct FingerprintExtractor<'a> {
     source: &'a str,
 }

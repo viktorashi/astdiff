@@ -291,6 +291,9 @@ fn generate_changes_for_match(
                 kind_to_string(&decl1.kind), decl1.name, decl2.name),
             structural_path: format!("global.{}->{}", decl1.name, decl2.name),
             string_diff: None,
+            classification: None,
+            display_diff: String::new(),
+            similarity_score: None,
         });
     }
 
@@ -304,6 +307,9 @@ fn generate_changes_for_match(
                 kind_to_string(&decl1.kind), decl1.name, decl1.line, decl2.line),
             structural_path: format!("global.{}", decl1.name),
             string_diff: None,
+            classification: None,
+            display_diff: String::new(),
+            similarity_score: None,
         });
     }
 
@@ -317,6 +323,9 @@ fn generate_changes_for_match(
                 kind_to_string(&decl1.kind), decl1.name, similarity * 100.0),
             structural_path: format!("global.{}", decl1.name),
             string_diff: None,
+            classification: None,
+            display_diff: String::new(),
+            similarity_score: None,
         });
     }
     

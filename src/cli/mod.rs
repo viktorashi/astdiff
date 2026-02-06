@@ -34,8 +34,8 @@ pub struct Args {
     #[clap(long)]
     pub summary: bool,
     
-    /// Show interleaved line-by-line diff
-    #[clap(long)]
+    /// [Deprecated] Show interleaved line-by-line diff (now uses default output)
+    #[clap(long, hide = true)]
     pub interleaved: bool,
     
     /// Show detailed analysis to stderr
@@ -58,7 +58,7 @@ pub struct Args {
     #[clap(long)]
     pub compact: bool,
     
-    /// Lite output showing only definition names and line numbers (no code)
+    /// Alias for --compact
     #[clap(long)]
     pub lite: bool,
     

@@ -135,7 +135,7 @@ fn run_diff(
     format: String,
     export_mappings: Option<std::path::PathBuf>,
     summary: bool,
-    interleaved: bool,
+    _interleaved: bool,
     verbose: bool,
     fingerprints: bool,
     report: bool,
@@ -209,40 +209,16 @@ fn run_diff(
     // TODO: Apply existing mappings to enhance the output with semantic names
     // diff.apply_mappings_to_result(&mut result);
     
-    // For detailed diff, we need to canonicalize both files
-    let (canonical1, canonical2) = if !summary && interleaved {
-        let _timer = Timer::new("canonicalize_for_output");
-        let mut analyzer1 = ScopeAnalyzer::new();
-        analyzer1.analyze(tree1.root_node(), &source1)?;
-        let mut canonicalizer1 = Canonicalizer::new(analyzer1);
-        canonicalizer1.canonicalize(&tree1, &source1)?;
-        let canonical1 = canonicalizer1.apply_canonicalization(&tree1, &source1)?;
-        
-        let mut analyzer2 = ScopeAnalyzer::new();
-        analyzer2.analyze(tree2.root_node(), &source2)?;
-        let mut canonicalizer2 = Canonicalizer::new(analyzer2);
-        canonicalizer2.canonicalize(&tree2, &source2)?;
-        let canonical2 = canonicalizer2.apply_canonicalization(&tree2, &source2)?;
-        
-        (Some(canonical1), Some(canonical2))
-    } else {
-        (None, None)
-    };
-    
     {
         let _timer = Timer::new("generate_output");
         match format.as_str() {
             "unified" => {
-                if lite {
-                    diff.print_lite(&result, &file1, &file2)
-                } else if compact {
-                    diff.print_compact(&result, &file1, &file2, &source1, &source2)
+                if compact || lite {
+                    diff.print_compact_locations(&result, &file1, &file2)
                 } else if summary {
                     diff.print_summary(&result, &file1, &file2, &source1, &source2)
-                } else if interleaved {
-                    diff.print_interleaved(&result, &file1, &file2, canonical1.as_deref(), canonical2.as_deref(), &source1, &source2)?
                 } else {
-                    diff.print_side_by_side_full(&result, &file1, &file2, &source1, &source2)?
+                    diff.print_default(&result, &file1, &file2, &source1, &source2)?
                 }
             }
             "side-by-side" => diff.print_side_by_side(&result, &file1, &file2, &source1, &source2),
@@ -307,7 +283,7 @@ fn run_inspect(input_file: &std::path::PathBuf, compare_file: Option<&std::path:
         let declarations2 = diff.extract_declarations_for_inspection(tree2.root_node(), &source2);
         
         // Run the matching algorithm
-        let (matches, _) = diff.match_declarations(&declarations1, &declarations2, &source1, &source2);
+        let (matches, _, _) = diff.match_declarations(&declarations1, &declarations2, &source1, &source2);
         
         // Find what each declaration in file1 matched to
         let mut match_map = std::collections::HashMap::new();
