@@ -183,6 +183,108 @@ pub fn compute_string_diff(fp1: &FunctionFingerprint, fp2: &FunctionFingerprint)
     }
 }
 
+/// Like compute_string_diff, but normalizes fp2's strings using the rename map first.
+/// This eliminates false positives from minifier variable name changes in template literals.
+pub fn compute_string_diff_normalized(
+    fp1: &FunctionFingerprint,
+    fp2: &FunctionFingerprint,
+    rename_map: &HashMap<String, String>,
+) -> StringDiff {
+    if rename_map.is_empty() {
+        return compute_string_diff(fp1, fp2);
+    }
+
+    // Normalize fp2's string values using the rename map
+    let normalized_fp2 = FunctionFingerprint {
+        strings: fp2.strings.iter().map(|s| {
+            StringFingerprint {
+                value: normalize_string_with_renames(&s.value, rename_map),
+                context: s.context.clone(),
+            }
+        }).collect(),
+        constants: fp2.constants.clone(),
+        api_calls: fp2.api_calls.clone(),
+        size: fp2.size,
+    };
+
+    compute_string_diff(fp1, &normalized_fp2)
+}
+
+/// Replace renamed identifiers in a string value (e.g., template literal text).
+/// Uses scan-and-lookup: extracts identifiers from the string and looks each up in the map.
+/// This is O(string_length) instead of O(string_length * map_size).
+pub fn normalize_string_with_renames(s: &str, rename_map: &HashMap<String, String>) -> String {
+    let mut output = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' {
+            // Start of potential identifier
+            let start = i;
+            let mut end = i + ch.len_utf8();
+            while let Some(&(j, next_ch)) = chars.peek() {
+                if next_ch.is_ascii_alphanumeric() || next_ch == '_' || next_ch == '$' {
+                    end = j + next_ch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let ident = &s[start..end];
+            if let Some(old_name) = rename_map.get(ident) {
+                output.push_str(old_name);
+            } else {
+                output.push_str(ident);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+/// Normalize all short minified identifiers in a string to a canonical placeholder "_".
+/// This catches local variables, function references, and module names that change between builds
+/// but aren't in the top-level rename map.
+pub fn normalize_minified_identifiers(s: &str) -> String {
+    let mut output = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' {
+            // Start of potential identifier — collect it
+            let start = i;
+            let mut end = i + ch.len_utf8();
+            while let Some(&(j, next_ch)) = chars.peek() {
+                if next_ch.is_ascii_alphanumeric() || next_ch == '_' || next_ch == '$' {
+                    end = j + next_ch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let ident = &s[start..end];
+            if looks_minified(ident) {
+                output.push('_');
+            } else {
+                output.push_str(ident);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+/// All identifiers ≤4 chars are normalized. Since we apply this to BOTH old and new
+/// strings symmetrically, real English words that are the same in both versions cancel
+/// out (both become "_"). Only structural differences in longer identifiers survive.
+fn looks_minified(s: &str) -> bool {
+    s.len() <= 4
+}
+
 pub struct FingerprintExtractor<'a> {
     source: &'a str,
 }

@@ -139,6 +139,9 @@ pub struct DiffResult {
     pub matched_declarations: usize,
     pub total_declarations1: usize,
     pub total_declarations2: usize,
+    /// Rename map: new_name → old_name (file2 → file1) for normalizing source2 references
+    #[serde(skip)]
+    pub rename_map: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +266,16 @@ impl StructuralDiff {
         }
     }
 
+    /// Normalize source text by replacing renamed identifiers with their old names.
+    /// Uses scan-and-lookup: extracts identifiers from the source and looks each up in the map.
+    #[allow(dead_code)]
+    fn normalize_source_with_renames(source: &str, rename_map: &HashMap<String, String>) -> String {
+        if rename_map.is_empty() {
+            return source.to_string();
+        }
+        fingerprint::normalize_string_with_renames(source, rename_map)
+    }
+
     fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
         use profiling::Timer;
         let _timer = Timer::new("calculate_line_statistics");
@@ -373,7 +386,7 @@ impl StructuralDiff {
                  declarations1.len(), declarations2.len());
         
         // Match declarations based on similarity
-        let (matches, changes) = {
+        let (matches, mut changes) = {
             let _timer = Timer::new("match_declarations_total");
             self.match_declarations(&declarations1, &declarations2, source1, source2)
         };
@@ -388,6 +401,52 @@ impl StructuralDiff {
             matched_declarations as f64 / total_declarations1.max(total_declarations2) as f64
         };
         
+        // Build inverted rename map (new_name → old_name) from matched declarations
+        let mut rename_map = HashMap::new();
+        for change in &changes {
+            if let ChangeType::Modification = change.change_type {
+                if change.description.contains("matched with") {
+                    if let Some(path) = change.structural_path.strip_prefix("global.") {
+                        if let Some((old_name, new_name)) = path.split_once("->") {
+                            rename_map.insert(new_name.to_string(), old_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Post-process: re-evaluate "text constant changes" with rename normalization.
+        // Two-stage normalization:
+        // 1. Apply rename map (top-level declaration references)
+        // 2. Normalize all short minified identifiers to "_" (local variables, module refs)
+        if !rename_map.is_empty() {
+            changes.retain(|change| {
+                if let ChangeType::Modification = change.change_type {
+                    if change.description.contains("text constant changes") {
+                        if let Some(ref string_diff) = change.string_diff {
+                            let has_real_changes = string_diff.important_changes.iter().any(|sc| {
+                                match sc {
+                                    fingerprint::StringChange::Modified { old, new, .. } => {
+                                        // Stage 1: Apply rename map to new value
+                                        let renamed = fingerprint::normalize_string_with_renames(
+                                            &new.value, &rename_map,
+                                        );
+                                        // Stage 2: Normalize minified identifiers in both
+                                        let norm_old = fingerprint::normalize_minified_identifiers(&old.value);
+                                        let norm_new = fingerprint::normalize_minified_identifiers(&renamed);
+                                        norm_new != norm_old
+                                    }
+                                    _ => true,
+                                }
+                            });
+                            return has_real_changes;
+                        }
+                    }
+                }
+                true
+            });
+        }
+
         Ok(DiffResult {
             identical: changes.is_empty(),
             similarity,
@@ -395,9 +454,10 @@ impl StructuralDiff {
             matched_declarations,
             total_declarations1,
             total_declarations2,
+            rename_map,
         })
     }
-    
+
     fn extract_declarations<'a>(&self, root: Node<'a>, source: &str) -> Vec<Declaration> {
         let mut declarations = Vec::new();
         self.extract_declarations_recursive(root, source, &mut declarations, true);
