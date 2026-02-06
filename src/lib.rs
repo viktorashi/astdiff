@@ -346,13 +346,13 @@ fn run_inspect(input_file: &std::path::PathBuf, compare_file: Option<&std::path:
         
         // Print AST snippet
         println!("\nAST Node:");
-        println!("  Kind: {}", decl1.node.kind());
-        println!("  Start: {}:{}", decl1.node.start_position().row + 1, decl1.node.start_position().column);
-        println!("  End: {}:{}", decl1.node.end_position().row + 1, decl1.node.end_position().column);
-        
+        println!("  Kind: {}", decl1.node_kind);
+        println!("  Start line: {}", decl1.line);
+        println!("  End line: {}", decl1.end_line);
+
         // Print source snippet
-        let start_byte = decl1.node.start_byte();
-        let end_byte = decl1.node.end_byte().min(source1.len());
+        let start_byte = decl1.start_byte;
+        let end_byte = decl1.end_byte.min(source1.len());
         let snippet = &source1[start_byte..end_byte];
         let preview = if snippet.len() > 200 {
             format!("{}...", &snippet[..200])

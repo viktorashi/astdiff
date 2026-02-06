@@ -25,8 +25,11 @@ pub struct StructuralDiff {
 pub struct Declaration {
     pub name: String,
     pub kind: DeclarationKind,
-    pub node: Node<'static>,
     pub line: usize,
+    pub end_line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub node_kind: String,
     pub signature: String,
     pub structural_hashes: HashSet<u64>,
     pub size: usize,
@@ -34,12 +37,15 @@ pub struct Declaration {
     pub fingerprint: Option<FunctionFingerprint>,
 }
 
-// Serializable version without the node
+// Serializable version (same fields now that Node is gone)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SerializableDeclaration {
     pub name: String,
     pub kind: DeclarationKind,
     pub line: usize,
+    pub end_line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
     pub signature: String,
     pub structural_hashes: HashSet<u64>,
     pub size: usize,
@@ -53,6 +59,9 @@ impl From<&Declaration> for SerializableDeclaration {
             name: decl.name.clone(),
             kind: decl.kind.clone(),
             line: decl.line,
+            end_line: decl.end_line,
+            start_byte: decl.start_byte,
+            end_byte: decl.end_byte,
             signature: decl.signature.clone(),
             structural_hashes: decl.structural_hashes.clone(),
             size: decl.size,
@@ -83,7 +92,7 @@ impl Declaration {
             name: self.name.clone(),
             kind: self.kind.clone(),
             line: self.line,
-            end_line: self.node.end_position().row + 1,
+            end_line: self.end_line,
             signature: self.signature.clone(),
             structural_hashes: self.structural_hashes.clone(),
             size: self.size,
@@ -377,44 +386,21 @@ impl StructuralDiff {
         declarations
     }
     
-    fn create_declaration(&self, name: String, kind: DeclarationKind, node: Node<'static>, 
-                         line: usize, signature: String, structural_hashes: HashSet<u64>, 
-                         source: &str) -> Declaration {
+    fn create_declaration(&self, name: String, kind: DeclarationKind,
+                         line: usize, end_line: usize, start_byte: usize, end_byte: usize,
+                         node_kind: &str, signature: String, structural_hashes: HashSet<u64>,
+                         fingerprint: Option<FunctionFingerprint>) -> Declaration {
         let size = structural_hashes.len();
         let minhash_signature = self.compute_minhash(&structural_hashes, 128);
-        
-        // Extract fingerprint for string diffing (always) and matching (when enabled)
-        // We always extract fingerprints so we can detect string content changes
-        // even when fingerprint-based matching is disabled
-        let fingerprint = if matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
-            let _timer = profiling::Timer::new("extract_fingerprint");
-            let extractor = FingerprintExtractor::new(source);
-            let fp = extractor.extract_function_fingerprint(node);
 
-            // Debug fingerprints
-            if std::env::var("ASTDIFF_DEBUG").is_ok() && !fp.strings.is_empty() {
-                eprintln!("Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
-                    match kind {
-                        DeclarationKind::Function => "function",
-                        DeclarationKind::Variable => "variable",
-                        _ => "other",
-                    },
-                    name, fp.strings.len(), fp.constants.len(), fp.api_calls.len());
-                for s in &fp.strings {
-                    eprintln!("  String: '{}' ({:?})", s.value, s.context);
-                }
-            }
-
-            Some(fp)
-        } else {
-            None
-        };
-        
         Declaration {
             name,
             kind,
-            node,
             line,
+            end_line,
+            start_byte,
+            end_byte,
+            node_kind: node_kind.to_string(),
             signature,
             structural_hashes,
             size,
@@ -422,37 +408,54 @@ impl StructuralDiff {
             fingerprint,
         }
     }
+
+    fn extract_fingerprint(&self, node: Node, source: &str, kind: &DeclarationKind, name: &str) -> Option<FunctionFingerprint> {
+        if !matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
+            return None;
+        }
+        let _timer = profiling::Timer::new("extract_fingerprint");
+        let extractor = FingerprintExtractor::new(source);
+        let fp = extractor.extract_function_fingerprint(node);
+
+        if std::env::var("ASTDIFF_DEBUG").is_ok() && !fp.strings.is_empty() {
+            eprintln!("Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
+                kind, name, fp.strings.len(), fp.constants.len(), fp.api_calls.len());
+            for s in &fp.strings {
+                eprintln!("  String: '{}' ({:?})", s.value, s.context);
+            }
+        }
+
+        Some(fp)
+    }
     
     fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
         match node.kind() {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = &source[name_node.byte_range()];
+                    let kind = DeclarationKind::Function;
+                    let fp = self.extract_fingerprint(node, source, &kind, name);
                     let signature = self.get_function_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        name.to_string(),
-                        DeclarationKind::Function,
-                        unsafe { std::mem::transmute(node) },
-                        node.start_position().row + 1,
-                        signature,
-                        structural_hashes,
-                        source,
+                        name.to_string(), kind,
+                        node.start_position().row + 1, node.end_position().row + 1,
+                        node.start_byte(), node.end_byte(), node.kind(),
+                        signature, structural_hashes, fp,
                     ));
                 }
             }
             "variable_declaration" if is_global => {
-                // Extract all variable declarators
                 for child in node.children(&mut node.walk()) {
                     if child.kind() == "variable_declarator" {
-                        // Skip variables without initialization - they don't provide meaningful information
                         if child.child_by_field_name("value").is_none() {
                             continue;
                         }
-                        
                         if let Some(name_node) = child.child_by_field_name("name") {
                             if name_node.kind() == "identifier" {
                                 let name = &source[name_node.byte_range()];
+                                let kind = DeclarationKind::Variable;
+                                let fp = self.extract_fingerprint(child, source, &kind, name);
                                 let signature = self.get_variable_signature(child, source);
                                 let structural_hashes = if let Some(value_node) = child.child_by_field_name("value") {
                                     self.collect_structural_hashes(value_node, source)
@@ -460,13 +463,10 @@ impl StructuralDiff {
                                     HashSet::new()
                                 };
                                 declarations.push(self.create_declaration(
-                                    name.to_string(),
-                                    DeclarationKind::Variable,
-                                    unsafe { std::mem::transmute(child) },
-                                    child.start_position().row + 1,
-                                    signature,
-                                    structural_hashes,
-                                    source,
+                                    name.to_string(), kind,
+                                    child.start_position().row + 1, child.end_position().row + 1,
+                                    child.start_byte(), child.end_byte(), child.kind(),
+                                    signature, structural_hashes, fp,
                                 ));
                             }
                         }
@@ -476,46 +476,45 @@ impl StructuralDiff {
             "class_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = &source[name_node.byte_range()];
+                    let kind = DeclarationKind::Class;
+                    let fp = self.extract_fingerprint(node, source, &kind, name);
                     let signature = self.get_class_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        name.to_string(),
-                        DeclarationKind::Class,
-                        unsafe { std::mem::transmute(node) },
-                        node.start_position().row + 1,
-                        signature,
-                        structural_hashes,
-                        source,
+                        name.to_string(), kind,
+                        node.start_position().row + 1, node.end_position().row + 1,
+                        node.start_byte(), node.end_byte(), node.kind(),
+                        signature, structural_hashes, fp,
                     ));
                 }
             }
             "import_statement" => {
+                let kind = DeclarationKind::Import;
+                let name = format!("import@{}", node.start_position().row);
+                let fp = self.extract_fingerprint(node, source, &kind, &name);
                 let signature = self.get_import_signature(node, source);
                 let structural_hashes = self.collect_structural_hashes(node, source);
                 declarations.push(self.create_declaration(
-                    format!("import@{}", node.start_position().row),
-                    DeclarationKind::Import,
-                    unsafe { std::mem::transmute(node) },
-                    node.start_position().row + 1,
-                    signature,
-                    structural_hashes,
-                    source,
+                    name, kind,
+                    node.start_position().row + 1, node.end_position().row + 1,
+                    node.start_byte(), node.end_byte(), node.kind(),
+                    signature, structural_hashes, fp,
                 ));
             }
             "export_statement" => {
                 if let Some(decl) = node.child_by_field_name("declaration") {
                     self.extract_declarations_recursive(decl, source, declarations, is_global);
                 } else {
+                    let kind = DeclarationKind::Export;
+                    let name = format!("export@{}", node.start_position().row);
+                    let fp = self.extract_fingerprint(node, source, &kind, &name);
                     let signature = self.get_export_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        format!("export@{}", node.start_position().row),
-                        DeclarationKind::Export,
-                        unsafe { std::mem::transmute(node) },
-                        node.start_position().row + 1,
-                        signature,
-                        structural_hashes,
-                        source,
+                        name, kind,
+                        node.start_position().row + 1, node.end_position().row + 1,
+                        node.start_byte(), node.end_byte(), node.kind(),
+                        signature, structural_hashes, fp,
                     ));
                 }
             }
