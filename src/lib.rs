@@ -19,8 +19,8 @@ use pretty::PrettyPrinter;
 
 pub fn run(args: Args) -> Result<()> {
     match args.mode() {
-        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, lite, parallel, dump } => {
-            run_diff(file1, file2, map1, map2, format, export_mappings, summary, interleaved, verbose, fingerprints, report, report_path, compact, lite, parallel, dump)
+        Mode::Diff { file1, file2, map1, map2, format, export_mappings, summary, verbose, fingerprints, report, report_path, compact, lite, dump } => {
+            run_diff(file1, file2, map1, map2, format, export_mappings, summary, verbose, fingerprints, report, report_path, compact, lite, dump)
         }
         Mode::Canonicalize { input_file, preserve_comments, pretty } => {
             run_canonicalize(&input_file, preserve_comments, pretty, args.verbose)
@@ -135,14 +135,12 @@ fn run_diff(
     format: String,
     export_mappings: Option<std::path::PathBuf>,
     summary: bool,
-    _interleaved: bool,
     verbose: bool,
     fingerprints: bool,
     report: bool,
     report_path: Option<std::path::PathBuf>,
     compact: bool,
     lite: bool,
-    _parallel: bool,
     dump: Option<std::path::PathBuf>,
 ) -> Result<()> {
     use crate::diff::StructuralDiff;

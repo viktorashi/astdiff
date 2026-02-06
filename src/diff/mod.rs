@@ -62,21 +62,6 @@ impl From<&Declaration> for SerializableDeclaration {
     }
 }
 
-impl SerializableDeclaration {
-    pub fn to_declaration(self) -> Declaration {
-        Declaration {
-            name: self.name,
-            kind: self.kind,
-            node: unsafe { std::mem::zeroed() }, // Placeholder node
-            line: self.line,
-            signature: self.signature,
-            structural_hashes: self.structural_hashes,
-            size: self.size,
-            minhash_signature: self.minhash_signature,
-            fingerprint: self.fingerprint,
-        }
-    }
-}
 
 // Thread-safe declaration data for parallel processing
 #[derive(Debug, Clone)]
@@ -127,6 +112,21 @@ impl std::fmt::Display for DeclarationKind {
             DeclarationKind::Export => write!(f, "export"),
         }
     }
+}
+
+/// Apply cross-kind penalty to similarity score.
+/// Function <-> Variable swaps are common in minified code (small penalty).
+/// Other kind mismatches get a larger penalty.
+fn apply_kind_penalty(similarity: f64, kind1: &DeclarationKind, kind2: &DeclarationKind) -> f64 {
+    if kind1 == kind2 {
+        return similarity;
+    }
+    let is_func_var_swap = matches!(
+        (kind1, kind2),
+        (DeclarationKind::Function, DeclarationKind::Variable)
+        | (DeclarationKind::Variable, DeclarationKind::Function)
+    );
+    similarity * if is_func_var_swap { 0.9 } else { 0.7 }
 }
 
 /// Classification of a matched declaration pair based on normalized diff.
@@ -707,65 +707,10 @@ impl StructuralDiff {
     
     
     pub fn calculate_declaration_similarity(&self, decl1: &Declaration, decl2: &Declaration, _source1: &str, _source2: &str) -> f64 {
-        // For imports and exports, use signature similarity regardless of kind
-        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) 
-            || matches!(decl2.kind, DeclarationKind::Import | DeclarationKind::Export) {
-            return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
-        }
-        
-        // Calculate base similarity from structural hash intersection
-        let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
-        let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
-        
-        let base_similarity = if union.is_empty() {
-            // Both are empty (e.g., simple variables with no initialization)
-            if decl1.signature == decl2.signature { 
-                1.0 
-            } else {
-                0.5
-            }
-        } else {
-            let jaccard = intersection.len() as f64 / union.len() as f64;
-            
-            // Boost similarity for variables with the same initialization type
-            if matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Variable) {
-                if decl1.signature.starts_with("var=") && decl2.signature.starts_with("var=") {
-                    let type1 = decl1.signature.strip_prefix("var=").unwrap_or("");
-                    let type2 = decl2.signature.strip_prefix("var=").unwrap_or("");
-                    
-                    // Debug specific cases
-                    if (decl1.name == "QhB" || decl1.name == "EhB") && (decl2.name == "QhB" || decl2.name == "EhB") {
-                        eprintln!("DEBUG MATCH: {} vs {} - sig1: {}, sig2: {}, jaccard: {:.3}", 
-                            decl1.name, decl2.name, decl1.signature, decl2.signature, jaccard);
-                    }
-                    
-                    // If they have the same type and low jaccard, boost similarity
-                    if type1 == type2 && jaccard < 0.5 && !type1.is_empty() {
-                        // Same type of initialization (e.g., both "member_expression")
-                        jaccard + 0.3  // Boost by 0.3
-                    } else {
-                        jaccard
-                    }
-                } else {
-                    jaccard
-                }
-            } else {
-                jaccard
-            }
-        };
-        
-        // Apply a penalty for different kinds, but allow matching
-        if decl1.kind != decl2.kind {
-            // Function <-> Variable is common in minified code, apply small penalty
-            if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
-                || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
-                base_similarity * 0.9  // 10% penalty
-            } else {
-                base_similarity * 0.7  // 30% penalty for other mismatches
-            }
-        } else {
-            base_similarity
-        }
+        // Delegate to the _data version via conversion
+        let d1 = decl1.to_data();
+        let d2 = decl2.to_data();
+        self.calculate_declaration_similarity_data(&d1, &d2, "", "")
     }
     
     
@@ -1216,64 +1161,31 @@ impl StructuralDiff {
     
     fn calculate_declaration_similarity_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, _source1: &str, _source2: &str) -> f64 {
         // For imports and exports, use signature similarity regardless of kind
-        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export) 
+        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export)
             || matches!(decl2.kind, DeclarationKind::Import | DeclarationKind::Export) {
             return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
         }
-        
-        // Quick size check - if sizes are too different, skip expensive set operations
+
         let size1 = decl1.structural_hashes.len();
         let size2 = decl2.structural_hashes.len();
-        
+
         if size1 == 0 && size2 == 0 {
-            // Both are empty (e.g., simple variables with no initialization)
-            if decl1.signature == decl2.signature {
-                return 1.0;
-            } else {
-                let base_sim = 0.5;
-                
-                // Apply cross-kind penalty if needed
-                if decl1.kind != decl2.kind {
-                    if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
-                        || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
-                        return base_sim * 0.9;
-                    } else {
-                        return base_sim * 0.7;
-                    }
-                }
-                return base_sim;
-            }
+            let base = if decl1.signature == decl2.signature { 1.0 } else { 0.5 };
+            return apply_kind_penalty(base, &decl1.kind, &decl2.kind);
         }
-        
+
         // If one is much larger than the other, they can't be similar enough
-        let size_ratio = if size1 > size2 {
-            size2 as f64 / size1 as f64
-        } else {
-            size1 as f64 / size2 as f64
-        };
-        
+        let size_ratio = size1.min(size2) as f64 / size1.max(size2) as f64;
         if size_ratio < 0.3 {
-            return 0.2; // Too different in size
+            return 0.2;
         }
-        
-        // Calculate base similarity from structural hash intersection
+
+        // Jaccard similarity from structural hash intersection
         let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
         let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
-        
         let base_similarity = intersection.len() as f64 / union.len() as f64;
-        
-        // Apply a penalty for different kinds, but allow matching
-        if decl1.kind != decl2.kind {
-            // Function <-> Variable is common in minified code, apply small penalty
-            if (matches!(decl1.kind, DeclarationKind::Function) && matches!(decl2.kind, DeclarationKind::Variable))
-                || (matches!(decl1.kind, DeclarationKind::Variable) && matches!(decl2.kind, DeclarationKind::Function)) {
-                base_similarity * 0.9  // 10% penalty
-            } else {
-                base_similarity * 0.7  // 30% penalty for other mismatches
-            }
-        } else {
-            base_similarity
-        }
+
+        apply_kind_penalty(base_similarity, &decl1.kind, &decl2.kind)
     }
     
     fn create_evidence_breakdown_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, 

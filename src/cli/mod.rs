@@ -34,9 +34,6 @@ pub struct Args {
     #[clap(long)]
     pub summary: bool,
     
-    /// [Deprecated] Show interleaved line-by-line diff (now uses default output)
-    #[clap(long, hide = true)]
-    pub interleaved: bool,
     
     /// Show detailed analysis to stderr
     #[clap(long)]
@@ -62,9 +59,6 @@ pub struct Args {
     #[clap(long)]
     pub lite: bool,
     
-    /// Disable parallel matching (enabled by default for better performance)
-    #[clap(long = "no-parallel")]
-    pub no_parallel: bool,
     
     /// Dump extracted declarations to a file for faster processing
     #[clap(long, value_name = "FILE")]
@@ -202,14 +196,12 @@ impl Args {
                         format: self.format.clone(),
                         export_mappings: self.export_mappings.clone(),
                         summary: self.summary,
-                        interleaved: self.interleaved,
                         verbose: self.verbose,
                         fingerprints: self.fingerprints,
                         report: self.report || self.report_path.is_some(),
                         report_path: self.report_path.clone(),
                         compact: self.compact,
                         lite: self.lite,
-                        parallel: !self.no_parallel,
                         dump: self.dump.clone(),
                     },
                     _ => {
@@ -217,7 +209,7 @@ impl Args {
                         eprintln!("\nUsage:");
                         eprintln!("  astdiff FILE1 FILE2                    # Compare two JavaScript files");
                         eprintln!("  astdiff FILE1 FILE2 --summary          # Show only summary of changes");
-                        eprintln!("  astdiff FILE1 FILE2 --interleaved     # Show interleaved diff");
+                        eprintln!("  astdiff FILE1 FILE2 --compact          # Show compact location summary");
                         eprintln!("  astdiff canon INPUT_FILE               # Canonicalize JavaScript");
                         eprintln!("  astdiff canon INPUT_FILE --map         # Generate mapping template");
                         eprintln!("  astdiff canon INPUT_FILE --map MAP.yaml # Apply mappings");
@@ -229,25 +221,6 @@ impl Args {
         }
     }
     
-    pub fn preserve_comments(&self) -> bool {
-        match &self.command {
-            Some(Command::Canon { preserve_comments, .. }) => *preserve_comments,
-            Some(Command::Inspect { .. }) => false,
-            Some(Command::Query { .. }) => false,
-            Some(Command::Load { .. }) => false,
-            None => false,
-        }
-    }
-    
-    pub fn pretty(&self) -> bool {
-        match &self.command {
-            Some(Command::Canon { pretty, .. }) => *pretty,
-            Some(Command::Inspect { .. }) => false,
-            Some(Command::Query { .. }) => false,
-            Some(Command::Load { .. }) => false,
-            None => false,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -280,14 +253,12 @@ pub enum Mode {
         format: String,
         export_mappings: Option<PathBuf>,
         summary: bool,
-        interleaved: bool,
         verbose: bool,
         fingerprints: bool,
         report: bool,
         report_path: Option<PathBuf>,
         compact: bool,
         lite: bool,
-        parallel: bool,
         dump: Option<PathBuf>,
     },
     /// Inspect a specific declaration
