@@ -169,9 +169,6 @@ pub struct Change {
     pub location2: Option<Location>,
     pub description: String,
     pub structural_path: String,
-    /// String constant changes for modified functions (text diffs like system prompts)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub string_diff: Option<StringDiff>,
     /// Classification derived from normalized diff (None for Add/Delete)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classification: Option<DiffClassification>,

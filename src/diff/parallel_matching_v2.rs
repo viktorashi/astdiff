@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use super::{DeclarationData, DeclarationKind, Change, ChangeType, DiffClassification};
-use super::fingerprint::{self, FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer, StringDiff};
+use super::fingerprint::{self, FunctionFingerprint, calculate_fingerprint_similarity, RarityScorer};
 use super::matching_report::EvidenceBreakdown;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -435,7 +435,6 @@ impl ParallelMatcherV2 {
                     None,
                     format!("Removed {} '{}'", kind_to_string(&decl.kind), decl.name),
                     format!("global.{}", decl.name),
-                    None,
                 ));
             }
         }
@@ -448,7 +447,6 @@ impl ParallelMatcherV2 {
                     Some(create_location_with_lines(decl, &lines2)),
                     format!("Added {} '{}'", kind_to_string(&decl.kind), decl.name),
                     format!("global.{}", decl.name),
-                    None,
                 ));
             }
         }
@@ -491,7 +489,6 @@ fn create_change(
     location2: Option<super::Location>,
     description: String,
     structural_path: String,
-    string_diff: Option<StringDiff>,
 ) -> super::Change {
     super::Change {
         change_type,
@@ -499,7 +496,6 @@ fn create_change(
         location2,
         description,
         structural_path,
-        string_diff,
         classification: None,
         display_diff: String::new(),
         similarity_score: None,
@@ -522,7 +518,6 @@ fn create_classified_change(
         location2,
         description,
         structural_path,
-        string_diff: None,
         classification: Some(classification),
         display_diff,
         similarity_score,
