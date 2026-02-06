@@ -90,128 +90,12 @@ impl Canonicalizer {
         format!("{:x}", hash % 0xFFFF)
     }
     
-    #[allow(dead_code)]
-    /// Recursively hash the structure of an AST node
-    fn hash_node_structure(&self, node: Node, source: &str, hasher: &mut DefaultHasher, depth: usize) {
-        // Skip comments entirely
-        if node.kind() == "comment" {
-            return;
-        }
-        
-        // Hash node type
-        node.kind().hash(hasher);
-        
-        match node.kind() {
-            // For operators and keywords, hash the exact type
-            "binary_expression" => {
-                // Also hash the operator
-                if let Some(op) = node.child(1) {
-                    op.kind().hash(hasher);
-                }
-            }
-            
-            // For literals, hash just the type, not the value
-            "number" | "string" | "true" | "false" | "null" | "undefined" => {
-                // Already hashed the type above
-            }
-            
-            // For identifiers, don't hash the name
-            "identifier" | "property_identifier" | "shorthand_property_identifier" => {
-                // Already hashed the type above
-            }
-            
-            // For control flow, hash the structure
-            "return_statement" | "break_statement" | "continue_statement" | 
-            "if_statement" | "while_statement" | "for_statement" | "for_in_statement" |
-            "for_of_statement" | "do_statement" | "switch_statement" => {
-                // Hash child count to capture structure
-                node.child_count().hash(hasher);
-            }
-            
-            // Skip certain nodes that don't affect structure
-            ";" | "," | "(" | ")" | "{" | "}" | "[" | "]" => {
-                return; // Don't hash punctuation
-            }
-            
-            _ => {
-                // For other nodes, hash child count
-                node.child_count().hash(hasher);
-            }
-        }
-        
-        // Recursively hash children, but skip comments
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() != "comment" {
-                    self.hash_node_structure(child, source, hasher, depth + 1);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-    
     pub fn canonicalize(&mut self, tree: &Tree, source: &str) -> Result<()> {
         let scopes = self.scope_analyzer.get_scopes().clone();
         
         self.canonicalize_scope("global", &scopes, tree, source)?;
         
         Ok(())
-    }
-    
-    #[allow(dead_code)]
-    /// Find the function node at a specific position
-    fn find_function_node_at_position<'a>(
-        &self, 
-        node: Node<'a>, 
-        line: usize, 
-        column: usize,
-        source: &str,
-    ) -> Option<Node<'a>> {
-        if node.kind() == "function_declaration" || node.kind() == "function_expression" {
-            let pos = node.start_position();
-            // Both tree-sitter and scope analyzer use 0-based positions
-            // The scope analyzer reports the position of the function name, 
-            // but the function node starts at the "function" keyword
-            if pos.row == line {
-                // Check if the function name is at the expected position
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name_pos = name_node.start_position();
-                    if name_pos.column == column {
-                        if std::env::var("ASTDIFF_DEBUG").is_ok() {
-                            eprintln!("Found function node at {}:{} (name at {}:{})", 
-                                pos.row, pos.column, name_pos.row, name_pos.column);
-                        }
-                        return Some(node);
-                    } else if std::env::var("ASTDIFF_DEBUG").is_ok() {
-                        eprintln!("Function at line {}: name at column {} (expected {})", 
-                            pos.row, name_pos.column, column);
-                    }
-                }
-            }
-        }
-        
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                if let Some(found) = self.find_function_node_at_position(
-                    cursor.node(), 
-                    line, 
-                    column,
-                    source
-                ) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        
-        None
     }
     
     fn canonicalize_scope(

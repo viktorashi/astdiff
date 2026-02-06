@@ -6,7 +6,6 @@ use serde::{Serialize, Deserialize};
 
 pub mod fingerprint;
 pub mod matching_report;
-pub mod threshold_learning;
 pub mod parallel_matching_v2;
 pub mod profiling;
 

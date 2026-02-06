@@ -161,40 +161,6 @@ impl MappingGenerator {
         Ok(output)
     }
     
-    #[allow(dead_code)]
-    fn determine_entry_type(&self, identifier: &crate::canonicalizer::IdentifierInfo) -> String {
-        if let Some(parent) = identifier.node.parent() {
-            match parent.kind() {
-                "variable_declarator" => "var".to_string(),
-                "formal_parameters" => "param".to_string(),
-                "function_declaration" | "function_expression" => {
-                    if parent.child_by_field_name("name") == Some(identifier.node) {
-                        "func".to_string()
-                    } else {
-                        "var".to_string() // Default to var for other cases
-                    }
-                }
-                _ => {
-                    // Determine type from the canonical name pattern
-                    if let Some(canonical) = self.canonicalizer.find_canonical_name(&identifier.text, &identifier.scope_id) {
-                        if canonical.starts_with("param_") {
-                            "param".to_string()
-                        } else if canonical.starts_with("fn_") {
-                            "func".to_string()
-                        } else {
-                            "var".to_string()
-                        }
-                    } else {
-                        "var".to_string()
-                    }
-                }
-            }
-        } else {
-            "var".to_string()
-        }
-    }
-    
-    
 }
 
 #[cfg(test)]
