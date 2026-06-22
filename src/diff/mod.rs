@@ -380,6 +380,9 @@ impl StructuralDiff {
     fn extract_declarations<'a>(&self, root: Node<'a>, source: &str) -> Vec<Declaration> {
         let mut declarations = Vec::new();
         self.extract_declarations_recursive(root, source, &mut declarations, true);
+        if declarations.is_empty() {
+            self.extract_bundle_module_declarations(root, source, &mut declarations);
+        }
         declarations
     }
     
@@ -423,6 +426,109 @@ impl StructuralDiff {
         }
 
         Some(fp)
+    }
+
+    fn extract_bundle_module_declarations<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>) {
+        if self.extract_bundle_array_modules(node, source, declarations) {
+            return;
+        }
+
+        if self.extract_bundle_object_modules(node, source, declarations) {
+            return;
+        }
+
+        for child in node.children(&mut node.walk()) {
+            self.extract_bundle_module_declarations(child, source, declarations);
+        }
+    }
+
+    fn extract_bundle_array_modules<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>) -> bool {
+        if node.kind() != "array" {
+            return false;
+        }
+
+        let mut module_nodes = Vec::new();
+        for child in node.named_children(&mut node.walk()) {
+            if self.is_function_like(child) {
+                module_nodes.push(child);
+            }
+        }
+
+        if module_nodes.len() < 3 {
+            return false;
+        }
+
+        for (index, module_node) in module_nodes.into_iter().enumerate() {
+            self.push_bundle_module_declaration(
+                module_node,
+                source,
+                declarations,
+                format!("module@{}", index),
+            );
+        }
+
+        true
+    }
+
+    fn extract_bundle_object_modules<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>) -> bool {
+        if node.kind() != "object" {
+            return false;
+        }
+
+        let mut module_entries = Vec::new();
+        for child in node.named_children(&mut node.walk()) {
+            if child.kind() != "pair" {
+                continue;
+            }
+
+            let Some(value_node) = child.child_by_field_name("value") else {
+                continue;
+            };
+
+            if !self.is_function_like(value_node) {
+                continue;
+            }
+
+            let Some(key_node) = child.child_by_field_name("key") else {
+                continue;
+            };
+
+            module_entries.push((source[key_node.byte_range()].to_string(), value_node));
+        }
+
+        if module_entries.len() < 3 {
+            return false;
+        }
+
+        for (module_name, module_node) in module_entries {
+            self.push_bundle_module_declaration(module_node, source, declarations, format!("module@{}", module_name));
+        }
+
+        true
+    }
+
+    fn push_bundle_module_declaration<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, name: String) {
+        let kind = DeclarationKind::Function;
+        let fp = self.extract_fingerprint(node, source, &kind, &name);
+        let signature = self.get_function_signature(node, source);
+        let structural_hashes = self.collect_structural_hashes(node, source);
+
+        declarations.push(self.create_declaration(
+            name,
+            kind,
+            node.start_position().row + 1,
+            node.end_position().row + 1,
+            node.start_byte(),
+            node.end_byte(),
+            node.kind(),
+            signature,
+            structural_hashes,
+            fp,
+        ));
+    }
+
+    fn is_function_like(&self, node: Node) -> bool {
+        matches!(node.kind(), "function_expression" | "arrow_function")
     }
     
     fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
