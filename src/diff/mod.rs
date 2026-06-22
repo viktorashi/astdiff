@@ -871,61 +871,6 @@ impl StructuralDiff {
         println!("Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
             additions.len(), deletions.len(), structural_changes.len(),
             string_changes.len(), total_unchanged);
-        println!();
-
-        // Show deletions
-        if !deletions.is_empty() {
-            println!("=== Removed ===");
-            for change in &deletions {
-                println!("--- {}", change.description);
-                if let Some(loc) = &change.location1 {
-                    println!("    at line {}: {}", loc.line, loc.code_snippet);
-                }
-            }
-            println!();
-        }
-
-        // Show additions
-        if !additions.is_empty() {
-            println!("=== Added ===");
-            for change in &additions {
-                println!("+++ {}", change.description);
-                if let Some(loc) = &change.location2 {
-                    println!("    at line {}: {}", loc.line, loc.code_snippet);
-                }
-            }
-            println!();
-        }
-
-        // Show structural changes
-        if !structural_changes.is_empty() {
-            println!("=== Structural Changes ===");
-            for change in &structural_changes {
-                println!("@@@ {}", change.description);
-                if let Some(loc) = &change.location1 {
-                    println!("  - at line {}: {}", loc.line, loc.code_snippet);
-                }
-                if let Some(loc) = &change.location2 {
-                    println!("  + at line {}: {}", loc.line, loc.code_snippet);
-                }
-            }
-            println!();
-        }
-
-        // Show string changes
-        if !string_changes.is_empty() {
-            println!("=== String Changes ===");
-            for change in &string_changes {
-                println!("@@@ {}", change.description);
-                if let Some(loc) = &change.location1 {
-                    println!("  - at line {}: {}", loc.line, loc.code_snippet);
-                }
-                if let Some(loc) = &change.location2 {
-                    println!("  + at line {}: {}", loc.line, loc.code_snippet);
-                }
-            }
-            println!();
-        }
     }
     
     pub fn generate_normalized_display_diff(
