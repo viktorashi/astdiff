@@ -140,6 +140,9 @@ impl ScopeAnalyzer {
     }
     
     fn handle_function_declaration(&mut self, node: Node, source: &str) -> Result<()> {
+        let function_name = node.child_by_field_name("name")
+            .map(|name_node| &source[name_node.byte_range()]);
+
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = &source[name_node.byte_range()];
             self.add_variable_to_current_scope(
@@ -150,7 +153,10 @@ impl ScopeAnalyzer {
             );
         }
         
-        let function_scope_id = self.create_scope(ScopeType::Function, None);
+        let function_scope_id = self.create_scope(
+            ScopeType::Function,
+            function_name.map(str::to_string),
+        );
         self.current_scope_id = function_scope_id;
         
         if let Some(params) = node.child_by_field_name("parameters") {
@@ -161,7 +167,13 @@ impl ScopeAnalyzer {
     }
     
     fn handle_function_expression(&mut self, node: Node, source: &str) -> Result<()> {
-        let function_scope_id = self.create_scope(ScopeType::Function, None);
+        let function_name = node.child_by_field_name("name")
+            .map(|name_node| &source[name_node.byte_range()]);
+
+        let function_scope_id = self.create_scope(
+            ScopeType::Function,
+            function_name.map(str::to_string),
+        );
         self.current_scope_id = function_scope_id;
         
         if let Some(name_node) = node.child_by_field_name("name") {
@@ -611,35 +623,6 @@ impl ScopeAnalyzer {
         position: tree_sitter::Point,
         is_hoisted: bool,
     ) {
-        // Handle function declarations that need their own scope
-        let mut fn_scope_to_create = None;
-        let current_depth = self.scopes.get(&self.current_scope_id).map(|s| s.depth).unwrap_or(0);
-        
-        if matches!(kind, VariableKind::FunctionDeclaration) {
-            let fn_scope_id = format!("fn_{}", name);
-            if !self.scopes.contains_key(&fn_scope_id) {
-                fn_scope_to_create = Some((fn_scope_id.clone(), current_depth + 1));
-            }
-        }
-        
-        // Create function scope if needed
-        if let Some((fn_scope_id, depth)) = fn_scope_to_create {
-            let fn_scope = Scope {
-                id: fn_scope_id.clone(),
-                scope_type: ScopeType::Function,
-                parent: Some(self.current_scope_id.clone()),
-                children: Vec::new(),
-                variables: Vec::new(),
-                depth,
-            };
-            self.scopes.insert(fn_scope_id.clone(), fn_scope);
-            
-            // Add to parent's children
-            if let Some(parent_scope) = self.scopes.get_mut(&self.current_scope_id) {
-                parent_scope.children.push(fn_scope_id);
-            }
-        }
-        
         // Add variable to current scope
         if let Some(scope) = self.scopes.get_mut(&self.current_scope_id) {
             scope.variables.push(Variable {

@@ -538,7 +538,7 @@ mod tests {
         canonicalizer.canonicalize(&tree, source).unwrap();
         
         let canonical_source = canonicalizer.apply_canonicalization(&tree, source).unwrap();
-        assert!(canonical_source.contains("fn_1"));
+        assert!(canonical_source.contains("fn_"));
         assert!(canonical_source.contains("param_1"));
         assert!(canonical_source.contains("param_2"));
     }

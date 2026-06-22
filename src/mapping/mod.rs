@@ -186,7 +186,10 @@ mod tests {
         let generator = MappingGenerator::new(canonicalizer, source.to_string());
         let mapping_file = generator.generate_mapping_file(&tree).unwrap();
         
-        assert!(mapping_file.contains("# FIRST LAST TYPE CANONICAL NEW"));
+        assert!(mapping_file.contains("# FIRST LAST TYPE SCOPE CANONICAL NEW"));
         assert!(mapping_file.contains("fn_"));
+
+        let mappings = MappingGenerator::parse_mapping_file(&mapping_file).unwrap();
+        assert!(mappings.keys().any(|key| key.starts_with("fn_")));
     }
 }
