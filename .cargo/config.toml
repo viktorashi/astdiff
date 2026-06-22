@@ -1,5 +1,3 @@
 [build]
 target-dir = "target"
 
-[env]
-CC = "/home/shcv/.guix-home/profile/bin/gcc"
